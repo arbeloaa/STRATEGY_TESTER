@@ -1,0 +1,44 @@
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# ── Virtual environment ────────────────────────────────────────────────────────
+venv/
+.venv/
+env/
+
+# ── Large generated databases (regenerate locally with data_pipeline/build_feature_cache.py)
+data/feature_cache.db
+data/market_data.db
+
+# ── Runtime logs (regenerated on every run) ────────────────────────────────────
+logs/daily_tester.log
+logs/gate_log.txt
+
+# ── Generated reports (recreated by scripts on each run) ──────────────────────
+reports/portfolio_report*.json
+reports/portfolio_report*.txt
+reports/portfolio_report*.xlsx
+reports/sampled_trades.json
+reports/stop_optimizer_results.*
+reports/virtual_trader_report_*.xlsx
+reports/walk_forward_results/
+reports/advisor_history/
+
+# ── IDE / OS ───────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.DS_Store
+Thumbs.db
+
+# ── Claude AI workspace ────────────────────────────────────────────────────────
+.claude/
+# Runtime-generated files
+logs/
+reports/
+
+# Generated or downloaded datasets
+data/*.csv
+data/*.db

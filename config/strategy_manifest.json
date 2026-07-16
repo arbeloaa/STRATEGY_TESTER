@@ -1,0 +1,206 @@
+{
+  "_version": "V30",
+  "_comment": "Single source of truth for all strategy constants. Edit here; both tester.py and portfolio_simulator.py reload on startup. All fallback values are identical to V30.",
+
+  "tester": {
+
+    "pass_thresholds": {
+      "semi":    5.0,
+      "tech":    6.3,
+      "medtech": 5.7,
+      "energy":  5.5,
+      "default": 5.5
+    },
+
+    "gate_weights": {
+      "DIRECT_WEIGHT": 1.0,
+      "PROXY_WEIGHT":  0.90,
+      "NA_WEIGHT":     0.0,
+      "W_G1":  0.8,
+      "W_G2":  1.0,
+      "W_G3":  1.0,
+      "W_G4":  1.0,
+      "W_G5":  1.0,
+      "W_G6":  1.0,
+      "W_G7":  1.0,
+      "W_G8":  1.5,
+      "W_G8_TECH": 0.8
+    },
+
+    "min_direct_gates": {
+      "tech":    3,
+      "medtech": 2,
+      "default": 2
+    },
+
+    "regime_adjustments": {
+      "BULL_STRONG":  -0.5,
+      "BULL_WEAK":    -0.2,
+      "BEAR_GRIND":    0.3,
+      "BEAR_VOLATILE": 0.6
+    },
+
+    "counter_cyclical": ["semi"],
+    "tech_rev_floor": -5.0,
+    "gm_mid_mult": 0.7,
+    "gm_bonus_cap": 0.2,
+    "non_g8_failure_penalty": 0.3,
+
+    "g1_dynamic_thresholds": {
+      "rev_gt_80_mult": 2.0,
+      "rev_gt_40_mult": 1.5,
+      "rev_gt_20_mult": 1.2
+    },
+
+    "veto": {
+      "cyclical":     20.0,
+      "non_cyclical": 12.0,
+      "Cybersecurity":      { "g2_min": 0.65, "g3_min": 22.0 },
+      "Solar Hardware":     { "g2_min": 0.20, "g3_min":  0.0 },
+      "FinTech & Payments": { "g2_min": 0.70, "g6_max":  0.35 }
+    },
+
+    "momentum": {
+      "rs_high_threshold":             70,
+      "rs_nascent_threshold":          65,
+      "nascent_6m_min":                12.5,
+      "above_ma200":                   1.0,
+      "above_ma100_rs70":              0.75,
+      "above_ma100":                   0.6,
+      "nascent_6m_rs65":               0.43,
+      "nascent_6m_floor":              0.33,
+      "green_energy_6m_min":           16.0,
+      "decay_ratio":                   1.03,
+      "tech_ma200_deep_cap_pct":      -15,
+      "tech_ma200_deep_cap_raw":       0.4,
+      "tech_nascent_6m":               0.33,
+      "tech_fundamentals_rescue_raw":  0.5,
+      "semi_rs_threshold":             60,
+      "semi_6m_strong":                11.0,
+      "semi_6m_partial":               0.5
+    },
+
+    "momentum_rescue": {
+      "medtech_threshold_pct": 0.7,
+      "medtech_rescue_range":  1.2,
+      "other_threshold_pct":   0.5,
+      "other_rescue_range":    1.5,
+      "bonus_min": 0.3,
+      "bonus_max": 0.8
+    },
+
+    "energy": {
+      "g1_thresholds":  { "solar_hw": 5.0, "solar_install": 2.0, "renewables_ps": 3.0 },
+      "gm_tops":        { "solar_hw": 42, "solar_install": 26, "renewables": 28 },
+      "gm_mids":        { "solar_hw": 22, "solar_install": 12, "renewables": 18 },
+      "g3_roic":        { "solar_hw": -5, "renewables_roic": -4, "renewables_fcf": 3 },
+      "g4_inv":         { "solar_hw_days": 120, "solar_hw_trend": 5, "solar_install_trend": 10, "renewables_rule40": -20 },
+      "g5_rev_floor":   -12.0,
+      "g6_share_growth_thr": 10,
+      "g7_gm_tops":     { "solar_hw": 35, "solar_install": 20, "renewables": 28 },
+      "g7_gm_floor_mult": { "solar_hw": 0.4, "other": 0.5 },
+      "g7_erosion_limit": 6.0,
+      "g7_solar_install_erosion_strict": 4.0
+    },
+
+    "tech": {
+      "g1_thresholds":  { "cyber": 2.5, "infra_saas": 2.0, "fintech": 1.0 },
+      "gm_configs":     { "cyber": [75, 65], "infra_saas": [70, 58], "fintech": [50, 38] },
+      "r40_bases":      { "cyber": 33, "infra_saas": 28, "fintech": 20 },
+      "g4_fcf_hard_floor":  -15,
+      "g4_fcf_strong":       8,
+      "g5_fcf_min":          5,
+      "g5_rev_combo":   { "rev": 15, "fcf": -5 },
+      "g5_hard_kill":   { "fcf": -10, "rev": 5 },
+      "g5_fintech":     { "rev": 15, "fcf": 5 },
+      "g6_dil_thrs":    { "cyber": 10, "infra_saas": 8, "fintech": 5 },
+      "g7_high_gm_escape":  { "gm": 68, "rev": 15 },
+      "g7_base":        { "rev": 5, "gm": 50 },
+      "g7_fintech":     { "rev_gm": [5, 40], "gm_rev": [50, -10], "gm_rev2": [55, 5] },
+      "g8_strong_fundamentals": { "gm_min": 65, "r40_min": 30, "rev_min": 10 },
+      "g8_temporarily_weak":    { "ma200_floor": -15, "ma100_floor": -15 },
+      "g8_override_raw": 0.5,
+      "g8_fo_score_threshold":  { "g2_sc": 0.9, "g3_eff": 0.9 },
+      "expensive_ps_thr":    5.0,
+      "expensive_score_gap": 0.5,
+      "strong_arm": { "strong_fcf": 8, "marginal_fcf": 5, "roic": 8 }
+    },
+
+    "medtech": {
+      "g1_thresholds":  { "surgical": 2.5, "monitoring": 2.0, "implants": 2.0 },
+      "gm_configs":     { "surgical": [65, 50], "monitoring": [70, 55], "implants": [60, 45] },
+      "g3_roic_thrs":   { "surgical": 12, "monitoring": 10, "implants": 10 },
+      "g4_r40_thrs":    { "surgical": 10, "monitoring": 15, "implants": 5 },
+      "g4_roic_bypass":  20,
+      "g5_rev_floor":    2.0,
+      "g5_roic_bypass":  15,
+      "g5_rev_bypass_floor": -5.0,
+      "g5_hard_fail_rev": -20,
+      "g6_reg_thrs":    { "surgical": 5, "monitoring": 8, "implants": 5 },
+      "g7_inv_thrs":    { "implants": 25, "other": 15 },
+      "g7_erosion_quality_thr": 2.0
+    },
+
+    "semi": {
+      "g1_thresholds":  { "proc_ai": 2.2, "connectivity": 2.2, "foundry_ps": 5.0, "memory_smallcap": 1.5 },
+      "gm_configs": {
+        "proc_ai":         [60, 45],
+        "connectivity":    [50, 35],
+        "foundry_analog":  [45, 30],
+        "memory_smallcap": [30, 15]
+      },
+      "g3_inv": {
+        "proc_ai":         { "trend": 10, "days": 130 },
+        "connectivity":    { "trend": 15, "days": 150 },
+        "foundry_analog":  { "days": 250 },
+        "memory_smallcap": { "days": 160 }
+      },
+      "g4_roic":    { "proc_ai": 3, "connectivity": 5, "foundry_analog": 7, "memory_erosion": 10 },
+      "g5_rev_floors": { "proc_ai": 5, "foundry_analog": -15 },
+      "g5_roic":    8,
+      "g6_dil":     { "proc_ai": 5, "connectivity": 5, "foundry_analog": 3, "memory_smallcap": 15 },
+      "g7_conn_gm_thr":    46,
+      "g7_foundry_gm_thr": 55,
+      "g7_foundry_rev":     5,
+      "catastrophic_rev":  -30
+    }
+  },
+
+  "simulator": {
+    "STARTING_CAPITAL":        100000,
+    "PER_BUY_FRACTION":        0.135,
+    "CONVICTION_MULT":         { "HIGH": 1.5, "MED": 1.0, "LOW": 0.4 },
+    "MAX_POSITION_PCT_EQUITY": 0.10,
+    "MAX_POSITIONS":           30,
+    "TARGET_POSITIONS":        20,
+    "MIN_CASH_TO_TRADE":       2500.0,
+    "FRACTIONAL_SHARES":       true,
+    "ALLOW_PYRAMIDING":        true,
+    "MAX_ADDS_PER_POSITION":   2,
+    "ADD_ON_MIN_GAIN_PCT":     0.10,
+    "TRAILING_STOP_PCT":       0.145,
+    "MOMENTUM_EXIT_MA":        50,
+    "MA_CONFIRM_DAYS":         4,
+    "GM_EROSION_CYCLICAL_THR": 20.0,
+    "GM_EROSION_NONCYC_THR":   12.0,
+    "MAX_HOLD_DAYS":           250,
+    "BELOW_MA_MIN_CLIMB_PCT":  0.43,
+    "BELOW_MA_LOOKBACK_DAYS":  3,
+    "MA100_BREAKDOWN_DAYS":    10,
+    "COMMISSION_MIN_USD":      2.50,
+    "COMMISSION_PER_SHARE":    0.01,
+    "REPORTING_LAG_DAYS":      90,
+    "SIM_START":               "2024-04-19",
+    "SIM_END":                 "2026-06-13",
+    "FETCH_DELAY":             0.3,
+    "DELIST_STALE_DAYS":       15,
+    "NDX_HIGH_VOL_THR":        20.0,
+    "diagnostics": {
+      "BAD_ENTRY_DAYS":  15,
+      "PREMATURE_DAYS":  20,
+      "PREMATURE_THR":   8.0,
+      "BARELY_RATIO":    0.70,
+      "RODE_DOWN_PEAK":  0.10
+    }
+  }
+}

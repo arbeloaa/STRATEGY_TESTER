@@ -1,0 +1,92 @@
+{
+  "_version": 1,
+  "_description": "Single source of truth for all tunable strategy parameters. Both tester.py and portfolio_simulator.py load this file at startup. Agent 2 edits only this file.",
+  "gates": {
+    "conviction_thresholds": {
+      "high_margin": 1.0,
+      "med_margin": 0.4
+    },
+    "regime_adjustments": {
+      "BULL_STRONG": -0.5,
+      "BULL_WEAK": -0.2,
+      "BEAR_GRIND": 0.3,
+      "BEAR_VOLATILE": 0.6
+    },
+    "gm_tops": {
+      "solar_hw": 50,
+      "solar_install": 26,
+      "renewables": 28
+    },
+    "gm_mids": {
+      "solar_hw": 22,
+      "solar_install": 12,
+      "renewables": 18
+    },
+    "gm_configs": {
+      "cyber": [
+        75,
+        65
+      ],
+      "infra_saas": [
+        71,
+        59
+      ],
+      "fintech": [
+        50,
+        38
+      ]
+    }
+  },
+  "exits": {
+    "trailing_stop_pct": 0.155,
+    "trail_activate_gain_pct": 0.1,
+    "take_profit_pct": 0.75,
+    "below_ma_trend_floor": 0.085,
+    "ma_confirm_days": 4,
+    "ma_breakdown_pct": 0.03,
+    "ma100_breakdown_days": 10,
+    "momentum_exit_ma": 50,
+    "min_hold_days": 5,
+    "max_hold_days": 250,
+    "gm_erosion_cyclical_thr": 20.0,
+    "gm_erosion_noncyc_thr": 12.0
+  },
+  "sizing": {
+    "per_buy_fraction": 0.135,
+    "conviction_mult": {
+      "HIGH": 1.5,
+      "MED": 1.0,
+      "LOW": 0.4
+    },
+    "max_positions": 30,
+    "max_position_pct_equity": 0.1,
+    "regime_position_mult": {
+      "BULL_STRONG": 1.0,
+      "BULL_WEAK": 0.8,
+      "BEAR_GRIND": 0.5,
+      "BEAR_VOLATILE": 0.35
+    },
+    "regime_max_positions": {
+      "BULL_STRONG": 30,
+      "BULL_WEAK": 25,
+      "BEAR_GRIND": 15,
+      "BEAR_VOLATILE": 10
+    },
+    "min_cash_to_trade": 2500,
+    "allow_pyramiding": true,
+    "max_adds_per_position": 2,
+    "add_on_min_gain_pct": 0.1,
+    "regime_exposure_cap": {
+      "BULL_STRONG": 1.0,
+      "BULL_WEAK": 0.85,
+      "BEAR_GRIND": 0.6,
+      "BEAR_VOLATILE": 0.4
+    }
+  },
+  "regime_detection": {
+    "ndx_ma_period": 100,
+    "bear_volatile_threshold": -0.25,
+    "bear_grind_threshold": -0.15,
+    "bull_weak_threshold": -0.05
+  }
+}
