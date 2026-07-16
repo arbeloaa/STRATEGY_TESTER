@@ -40,5 +40,5 @@ logs/
 reports/
 
 # Generated or downloaded datasets
-data/*.csv
+
 data/*.db
