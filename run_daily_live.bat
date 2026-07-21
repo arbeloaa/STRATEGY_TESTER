@@ -1,5 +1,5 @@
 @echo off
-cd /d C:\Projects\STRATEGY_TESTER
+cd /d "%~dp0"
 
 call venv\Scripts\activate
 
@@ -16,7 +16,7 @@ python -c "import json; d=json.load(open('reports/gate_report_latest.json','r',e
 echo ==============================
 echo Uploading report to VPS
 echo ==============================
-scp "C:\Projects\STRATEGY_TESTER\reports\gate_report_latest.json" administrator@204.12.203.95:/app/reports/gate_report_latest.json
+scp "reports\gate_report_latest.json" administrator@204.12.203.95:/app/reports/gate_report_latest.json
 
 echo ==============================
 echo Running VPS portfolio manager DRY RUN

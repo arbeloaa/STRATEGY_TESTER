@@ -59,10 +59,14 @@ from pathlib import Path
 from collections import defaultdict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "data_pipeline"))
 
-CACHE_DB   = PROJECT_ROOT / "data" / "feature_cache.db"
-OUTPUT_TXT = PROJECT_ROOT / "logs"  / "opportunity_report.txt"
+from config.paths import FEATURE_CACHE_DB, LOGS_DIR
+
+CACHE_DB   = FEATURE_CACHE_DB
+OUTPUT_TXT = LOGS_DIR  / "opportunity_report.txt"
 
 # Import delisted-bias caveat from source of truth
 try:
@@ -639,9 +643,9 @@ def main():
     output_path = Path(args.output)
 
     if not cache_path.exists():
-        print(f"ERROR: feature cache not found at {cache_path}")
-        print("Run scripts/build_feature_cache.py first.")
-        sys.exit(1)
+        raise FileNotFoundError(
+            f"Feature cache database not found: {cache_path.resolve()}"
+        )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
 

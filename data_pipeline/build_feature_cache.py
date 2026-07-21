@@ -92,9 +92,10 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
+from config.paths import FEATURE_CACHE_DB, MARKET_DATA_DB
 
-CACHE_DB  = PROJECT_ROOT / "data" / "feature_cache.db"
-MARKET_DB = PROJECT_ROOT / "data" / "market_data.db"
+CACHE_DB  = FEATURE_CACHE_DB
+MARKET_DB = MARKET_DATA_DB
 
 def _month_starts(sy=2020, sm=1, ey=2026, em=6):
     dates = []
@@ -270,7 +271,13 @@ CREATE TABLE IF NOT EXISTS _yfinance_fetch_status (
 # ---------------------------------------------------------------------------
 
 def _open_cache(path=None):
-    p = str(path or CACHE_DB)
+    p = Path(path or CACHE_DB)
+    if not p.exists():
+        if p.is_symlink():
+            raise FileNotFoundError(
+                f"Feature cache database symlink target not found: {p} -> {p.resolve()}"
+            )
+        p.touch()
     conn = sqlite3.connect(p)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
@@ -1397,6 +1404,8 @@ def main():
     print("\n[STEP 4b] Loading local price cache (market_data.db) ...")
     local_price_cache = {}
     try:
+        if not MARKET_DB.exists():
+            raise FileNotFoundError(f"Market data database not found: {MARKET_DB.resolve()}")
         conn_mkt = sqlite3.connect(str(MARKET_DB))
         local_tks = [r[0] for r in conn_mkt.execute(
             "SELECT DISTINCT ticker FROM prices"

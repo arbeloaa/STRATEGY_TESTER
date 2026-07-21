@@ -35,6 +35,10 @@
         50,
         38
       ]
+    },
+    "gm_relative": {
+      "enabled": true,
+      "percentile": 50
     }
   },
   "exits": {

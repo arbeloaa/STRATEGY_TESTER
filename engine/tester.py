@@ -3,12 +3,46 @@ import sys, json, re, statistics
 from datetime import datetime, timedelta
 from pathlib import Path
 
+# Add project root to sys.path
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
+from config.paths import PROJECT_ROOT, DATA_DIR, REPORTS_DIR, LOGS_DIR, CONFIG_DIR, FEATURE_CACHE_DB
+import sqlite3
+
 import json as _json
-_PARAMS_PATH = Path(__file__).resolve().parents[1] / "config" / "strategy_params.json"
+_PARAMS_PATH = CONFIG_DIR / "strategy_params.json"
 def _load_params():
     with open(_PARAMS_PATH, "r") as f:
         return _json.load(f)
 _P = _load_params()
+
+_PERCENTILES = {}
+def load_percentiles():
+    global _PERCENTILES
+    if not FEATURE_CACHE_DB.exists():
+        print(f"[WARN] Feature cache database not found at {FEATURE_CACHE_DB}. Relative gates fallback to fixed thresholds.")
+        return
+    try:
+        conn = sqlite3.connect(f"file:{FEATURE_CACHE_DB}?mode=ro", uri=True)
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='industry_percentiles'")
+        if not cur.fetchone():
+            print(f"[WARN] Table 'industry_percentiles' not found in database. Relative gates will fallback to fixed thresholds.")
+            return
+        cur.execute("SELECT date, industry, metric, p25, p40, p50, p60, p75 FROM industry_percentiles")
+        rows = cur.fetchall()
+        for r in rows:
+            dt, ind, met, p25, p40, p50, p60, p75 = r
+            _PERCENTILES[(dt, ind, met)] = {
+                25: p25, 40: p40, 50: p50, 60: p60, 75: p75
+            }
+        print(f"[INFO] Successfully loaded {len(_PERCENTILES)} percentile entries from {FEATURE_CACHE_DB}.")
+    except Exception as e:
+        print(f"[WARN] Error loading percentile tables: {e}. Relative gates will fallback to fixed thresholds.")
+
+load_percentiles()
 
 import pandas as pd
 try:
@@ -30,10 +64,10 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.comments import Comment
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-MULTI_CSV  = PROJECT_ROOT / "data" / "multi_sector_trend_latest.csv"
-OUTPUT_DIR = PROJECT_ROOT / "reports"
-LOG_PATH   = PROJECT_ROOT / "logs" / "gate_log.txt"
+# PROJECT_ROOT is imported from config.paths above
+MULTI_CSV  = DATA_DIR / "multi_sector_trend_latest.csv"
+OUTPUT_DIR = REPORTS_DIR
+LOG_PATH   = LOGS_DIR / "gate_log.txt"
 
 PASS_THRESHOLD_SEMI_BASE    = 5.0
 PASS_THRESHOLD_TECH_BASE    = 6.3
@@ -285,7 +319,25 @@ def gm_band_score(gm: float, top: float, mid: float, proxy: bool = False) -> tup
     else:           return 0.0, "fail", w
 
 def gm_gate(gm: float, gm_erosion: float,
-            top: float, mid: float, proxy: bool = False) -> tuple:
+            top: float, mid: float, proxy: bool = False,
+            date: str = None, sector: str = None) -> tuple:
+    gm_rel_config = _P.get("gates", {}).get("gm_relative", {})
+    if gm_rel_config.get("enabled", False) and date and sector:
+        pct = gm_rel_config.get("percentile", 40)
+        date_str = str(date)
+        month_start = f"{date_str[:7]}-01"
+        p_data = _PERCENTILES.get((month_start, sector, "gm_pct"))
+        if p_data and pct in p_data:
+            p_val = p_data[pct]
+            passed = gm >= p_val
+            w = PROXY_WEIGHT if proxy else DIRECT_WEIGHT
+            score = w if passed else 0.0
+            note = (f"[RELATIVE] GM={gm:.1f}% >= p{pct}({sector})={p_val:.1f}% PASS" if passed
+                    else f"[RELATIVE] GM={gm:.1f}% < p{pct}({sector})={p_val:.1f}% FAIL")
+            return (passed, w, note, proxy, score)
+        else:
+            print(f"[FALLBACK] No percentile row found for date={date} (month_start={month_start}), industry={sector}, metric=gm_pct. Falling back to fixed thresholds (top={top}%, mid={mid}%).")
+
     score, band, w = gm_band_score(gm, top, mid, proxy)
     bonus = 0.0
     if gm_erosion < 0 and score > 0:
@@ -509,7 +561,9 @@ def gates_energy(row, sub, sector_pct_rank):
                 proxy=False, wt=W_G1)
     gm_tops = _P["gates"]["gm_tops"]
     gm_mids = _P["gates"]["gm_mids"]
-    results["G2 Gross Margin"] = gm_gate(gm, gm_erosion, gm_tops[sub], gm_mids[sub])
+    date = row.get("Date") or row.get("date") or datetime.now().strftime("%Y-%m-%d")
+    sector = row.get("SharadarIndustry") or row.get("Sector")
+    results["G2 Gross Margin"] = gm_gate(gm, gm_erosion, gm_tops[sub], gm_mids[sub], date=date, sector=sector)
     if sub == "solar_hw":
         ok = roic > -5
         results["G3 Capital Eff."] = gate(ok,
@@ -604,7 +658,9 @@ def gates_tech(row, sub, sector_pct_rank):
         ps, base_thrs[sub], rev_growth, f"Sales-PEG ({sub})")
     gm_configs = {k: tuple(v) for k, v in _P["gates"]["gm_configs"].items()}
     top, mid = gm_configs[sub]
-    results["G2 Gross Margin"] = gm_gate(gm, gm_erosion, top, mid)
+    date = row.get("Date") or row.get("date") or datetime.now().strftime("%Y-%m-%d")
+    sector = row.get("SharadarIndustry") or row.get("Sector")
+    results["G2 Gross Margin"] = gm_gate(gm, gm_erosion, top, mid, date=date, sector=sector)
     # V30: no bear adjustment -- was -3 in bear
     # FLYW/CPAY/RAMP passed on weakened thresholds
     r40_bases = {"cyber": 33, "infra_saas": 28, "fintech": 20}
@@ -709,7 +765,9 @@ def gates_medtech(row, sub, sector_pct_rank):
         ps, base_thrs[sub], rev_growth, f"MedTech P/S ({sub})", proxy=False)
     gm_configs = {"surgical": (65, 50), "monitoring": (70, 55), "implants": (55, 45)}  # was implants (60, 45) -- Diagnostics & Lab Tech pilot floor raise per critic one-sector-at-a-time
     top, mid = gm_configs[sub]
-    results["G2 Gross Margin"] = gm_gate(gm, gm_erosion, top, mid)
+    date = row.get("Date") or row.get("date") or datetime.now().strftime("%Y-%m-%d")
+    sector = row.get("SharadarIndustry") or row.get("Sector")
+    results["G2 Gross Margin"] = gm_gate(gm, gm_erosion, top, mid, date=date, sector=sector)
     roic_thr = {"surgical": 12, "monitoring": 10, "implants": 10}[sub]
     ok = roic > roic_thr
     results["G3 ROIC"] = gate(ok,
@@ -800,7 +858,9 @@ def gates_semi(row, sub, sector_pct_rank):
         "foundry_analog": (45, 30), "memory_smallcap": (30, 15),
     }
     top, mid = gm_configs[sub]
-    results["G2 Gross Margin"] = gm_gate(gm, gm_erosion, top, mid)
+    date = row.get("Date") or row.get("date") or datetime.now().strftime("%Y-%m-%d")
+    sector = row.get("SharadarIndustry") or row.get("Sector")
+    results["G2 Gross Margin"] = gm_gate(gm, gm_erosion, top, mid, date=date, sector=sector)
     if sub == "proc_ai":
         ok = inv_trend <= 10 or inv_days < 130
         results["G3 Inventory"] = gate(ok,

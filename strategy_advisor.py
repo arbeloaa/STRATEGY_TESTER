@@ -28,16 +28,22 @@ except ImportError:
 # ============================================================================
 #  PATHS + CONSTANTS
 # ============================================================================
-PROJECT_ROOT   = Path(__file__).resolve().parent
-PARAMS_JSON    = PROJECT_ROOT / "config" / "strategy_params.json"
-BEST_JSON      = PROJECT_ROOT / "config" / "current_best_params.json"
-HISTORY_JSON   = PROJECT_ROOT / "logs" / "params_history.json"
-CHANGE_LOG     = PROJECT_ROOT / "logs" / "change_log.txt"
-REPORT_JSON    = PROJECT_ROOT / "reports" / "portfolio_report.json"
-REPORT_TXT     = PROJECT_ROOT / "reports" / "portfolio_report.txt"
-SAMPLED_JSON   = PROJECT_ROOT / "reports" / "sampled_trades.json"
-ADVISOR_REPORT = PROJECT_ROOT / "reports" / "strategy_advisor_report.txt"
-ADVISOR_HIST   = PROJECT_ROOT / "reports" / "advisor_history"
+# Add project root to sys.path
+_PROJECT_ROOT = Path(__file__).resolve().parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
+from config.paths import PROJECT_ROOT, CONFIG_DIR, LOGS_DIR, REPORTS_DIR
+
+PARAMS_JSON    = CONFIG_DIR  / "strategy_params.json"
+BEST_JSON      = CONFIG_DIR  / "current_best_params.json"
+HISTORY_JSON   = LOGS_DIR    / "params_history.json"
+CHANGE_LOG     = LOGS_DIR    / "change_log.txt"
+REPORT_JSON    = REPORTS_DIR / "portfolio_report.json"
+REPORT_TXT     = REPORTS_DIR / "portfolio_report.txt"
+SAMPLED_JSON   = REPORTS_DIR / "sampled_trades.json"
+ADVISOR_REPORT = REPORTS_DIR / "strategy_advisor_report.txt"
+ADVISOR_HIST   = REPORTS_DIR / "advisor_history"
 
 MODEL            = "claude-opus-4-8"
 MAX_TOKENS       = 8000

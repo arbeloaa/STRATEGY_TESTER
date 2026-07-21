@@ -7,8 +7,11 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 # Import local DB module (safe if not present -- warn only)
+import sys as _sys
 try:
-    import sys as _sys
+    _PROJECT_ROOT = Path(__file__).resolve().parents[1]
+    if str(_PROJECT_ROOT) not in _sys.path:
+        _sys.path.insert(0, str(_PROJECT_ROOT))
     _sys.path.insert(0, str(Path(__file__).resolve().parent))  # data_pipeline/
     import db as _db
     _DB_AVAILABLE = True
@@ -39,8 +42,8 @@ FUNDAMENTAL_MAX_AGE_DAYS = 450
 # the 3 qualifying fiscal years required by the EARNINGS_LAG_DAYS filter.
 WF_MODE = os.environ.get("WF_MODE", "") == "1"
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-OUTPUT_DIR = str(PROJECT_ROOT / "data")
+from config.paths import PROJECT_ROOT, DATA_DIR
+OUTPUT_DIR = str(DATA_DIR)
 
 # ---------------------------------------------
 #  SURVIVORSHIP BIAS TICKERS

@@ -23,7 +23,11 @@ from pathlib import Path
 
 # Locate data_pipeline siblings
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # data_pipeline/
+
+from config.paths import DATA_DIR, LOGS_DIR
 
 from data_fetcher import (
     compute_fundamentals_at,
@@ -213,13 +217,13 @@ def build_coverage_text(df):
 
 def main():
     parser = argparse.ArgumentParser(description="Build PIT fundamentals CSV")
-    parser.add_argument("--out-dir", default=str(PROJECT_ROOT / "data"),
+    parser.add_argument("--out-dir", default=str(DATA_DIR),
                         help="Directory for output files (default: project data dir)")
     args = parser.parse_args()
 
     out_dir  = args.out_dir
-    csv_path = os.path.join(out_dir, "pit_fundamentals.csv")
-    cov_path = str(PROJECT_ROOT / "logs" / "pit_coverage.txt")
+    csv_path = str(Path(out_dir) / "pit_fundamentals.csv")
+    cov_path = str(LOGS_DIR / "pit_coverage.txt")
 
     # Ensure DB is initialised
     try:

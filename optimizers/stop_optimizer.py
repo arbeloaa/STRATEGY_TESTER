@@ -29,11 +29,16 @@ from datetime import datetime, timedelta
 import pandas as pd
 import yfinance as yf
 
-# ---------------------------------------------------------------------------
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_JSON = PROJECT_ROOT / "reports" / "gate_report_latest.json"
-OUTPUT_CSV   = PROJECT_ROOT / "reports" / "stop_optimizer_results.csv"
-OUTPUT_JSON  = PROJECT_ROOT / "reports" / "stop_optimizer_results.json"
+# Add project root to sys.path
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
+from config.paths import PROJECT_ROOT, REPORTS_DIR
+
+DEFAULT_JSON = REPORTS_DIR / "gate_report_latest.json"
+OUTPUT_CSV   = REPORTS_DIR / "stop_optimizer_results.csv"
+OUTPUT_JSON  = REPORTS_DIR / "stop_optimizer_results.json"
 FETCH_DELAY  = 0.25
 N_COMBINATIONS = 50
 
@@ -446,7 +451,7 @@ def main():
     log(f"  JSON -> {OUTPUT_JSON}", "cyan")
 
     if args.apply_best and improved:
-        vt_path = PROJECT_ROOT / "scripts" / "virtual_trader.py"
+        vt_path = PROJECT_ROOT / "engine" / "virtual_trader.py"
         log(f"\n  Applying best params to {vt_path.name} ...", "yellow")
         if apply_params_to_vt(best_p, vt_path):
             log("  virtual_trader.py patched successfully", "green")

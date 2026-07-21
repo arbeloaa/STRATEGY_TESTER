@@ -21,8 +21,13 @@ try:
 except ImportError:
     print("ERROR: yfinance not installed"); sys.exit(1)
 
-# Import DB module from data_pipeline/
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "data_pipeline"))
+# Add project root to sys.path
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+sys.path.insert(0, str(_PROJECT_ROOT / "data_pipeline"))
+
+from config.paths import PROJECT_ROOT, MARKET_DATA_DB, FEATURE_CACHE_DB, REPORTS_DIR, LOGS_DIR, CONFIG_DIR
 import db as _db
 
 try:
@@ -36,14 +41,14 @@ except ImportError:
 # ============================================================================
 #  PATHS
 # ============================================================================
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-OUTPUT_DIR  = PROJECT_ROOT / "reports"
-PERF_HIST   = PROJECT_ROOT / "logs" / "performance_history.txt"
+# PROJECT_ROOT is imported from config.paths above
+OUTPUT_DIR  = REPORTS_DIR
+PERF_HIST   = LOGS_DIR / "performance_history.txt"
 
 # ============================================================================
 #  PARAMS  --  loaded from strategy_params.json (single source of truth)
 # ============================================================================
-_PARAMS_PATH = PROJECT_ROOT / "config" / "strategy_params.json"
+_PARAMS_PATH = CONFIG_DIR / "strategy_params.json"
 def _load_params():
     with open(_PARAMS_PATH, "r") as f:
         return json.load(f)
@@ -91,7 +96,7 @@ SIM_END                 = "2026-06-13"
 # ============================================================================
 
 # Import gate logic from tester.py (safe now that log setup is in main())
-sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
+sys.path.insert(0, str(PROJECT_ROOT / "engine"))
 import tester as _t
 
 # ============================================================================
@@ -163,6 +168,30 @@ _FUND_NONE_LOG = []   # list of (ticker, date_str) tuples
 # {ticker: [(avail_date_str, captured_at_str, metrics_dict), ...]} sorted by (avail, cap) ASC
 _FUND_PRELOADED = {}
 
+# Ticker -> real SHARADAR industry (from SHARADAR/TICKERS, distinct from the
+# curated "Sector" bucket that SECTOR_MAP uses for universe/sub-bucket routing).
+# Used only for the gm_relative percentile lookup in tester.gm_gate.
+_TICKER_INDUSTRY = {}
+
+
+def _load_ticker_industry():
+    """Load ticker -> SHARADAR industry from feature_cache._sharadar_tickers."""
+    import sqlite3 as _sqlite3
+    if not FEATURE_CACHE_DB.exists():
+        return {}
+    try:
+        conn = _sqlite3.connect(f"file:{FEATURE_CACHE_DB}?mode=ro", uri=True)
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='_sharadar_tickers'")
+        if not cur.fetchone():
+            return {}
+        rows = cur.execute("SELECT ticker, industry FROM _sharadar_tickers WHERE industry IS NOT NULL").fetchall()
+        conn.close()
+        return {t: ind for t, ind in rows}
+    except Exception as exc:
+        print(f"  [WARN] _load_ticker_industry: {exc}")
+        return {}
+
 
 def _preload_fundamentals():
     """
@@ -171,7 +200,9 @@ def _preload_fundamentals():
     Returns the same dict format as _FUND_PRELOADED.
     """
     import sqlite3 as _sqlite3, json as _json
-    db_file = str(PROJECT_ROOT / "data" / "market_data.db")
+    db_file = MARKET_DATA_DB
+    if not db_file.exists():
+        raise FileNotFoundError(f"Market data database not found: {db_file.resolve()}")
     try:
         conn = _sqlite3.connect(db_file)
         conn.execute("PRAGMA journal_mode=WAL")
@@ -485,6 +516,9 @@ def score_stock_pit(ticker, as_of_date, fund_row, pit_mom, rs_score, ndx_regime)
     row.update(pit_mom)
     row["MARKET_REGIME"] = ndx_regime
     row["Relative_Strength_Score"] = rs_score
+    row["date"] = as_of_date
+    row["Date"] = as_of_date
+    row["SharadarIndustry"] = _TICKER_INDUSTRY.get(ticker)
 
     try:
         vetoed, veto_reason = _t.check_veto(row, 50.0)
@@ -1669,6 +1703,10 @@ def main():
     t_fund = time.time() - t0_fund
     n_snaps = sum(len(v) for v in _FUND_PRELOADED.values())
     print(f"  Preloaded: {n_snaps} snapshots, {len(_FUND_PRELOADED)} tickers  ({t_fund:.1f}s)")
+
+    global _TICKER_INDUSTRY
+    _TICKER_INDUSTRY = _load_ticker_industry()
+    print(f"  Loaded SHARADAR industry for {len(_TICKER_INDUSTRY)} tickers (relative-gate lookup)")
 
     fund_rows = {}   # kept for call-site signature compat; not used in DB path
 

@@ -64,10 +64,16 @@ except ImportError:
 # ---------------------------------------------
 #  SETTINGS -- edit these
 # ---------------------------------------------
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-BASE_DIR     = PROJECT_ROOT / "scripts"
-DEFAULT_JSON = PROJECT_ROOT / "reports" / "gate_report_latest.json"
-OUTPUT_DIR   = PROJECT_ROOT / "reports"
+# Add project root to sys.path
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
+from config.paths import PROJECT_ROOT, REPORTS_DIR
+
+BASE_DIR     = PROJECT_ROOT / "engine"
+DEFAULT_JSON = REPORTS_DIR / "gate_report_latest.json"
+OUTPUT_DIR   = REPORTS_DIR
 
 STARTING_CAPITAL   = 100_000   # USD
 
@@ -876,7 +882,7 @@ def main(json_path: Path, capital: float):
         "exit_breakdown": exit_breakdown,
         "positions":      results,
     }
-    vt_out = PROJECT_ROOT / "reports" / "vt_results_latest.json"
+    vt_out = REPORTS_DIR / "vt_results_latest.json"
     with open(vt_out, "w", encoding="utf-8") as f:
         json.dump(vt_json, f, indent=2, default=str)
     log(f"\n  JSON saved -> {vt_out}", "cyan")

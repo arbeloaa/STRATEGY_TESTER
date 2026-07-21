@@ -28,6 +28,11 @@ import sys, json, os, shutil, subprocess, time, re, math, argparse, textwrap
 from datetime import datetime
 from pathlib import Path
 
+# Add project root to sys.path
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
 # ============================================================================
 #  OPTIONAL API IMPORTS
 # ============================================================================
@@ -48,17 +53,17 @@ except ImportError:
 # ============================================================================
 #  PATHS
 # ============================================================================
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+from config.paths import PROJECT_ROOT, FEATURE_CACHE_DB, REPORTS_DIR, LOGS_DIR
+
 SIMULATOR    = PROJECT_ROOT / "engine" / "portfolio_simulator.py"
 SIM_START_OVERRIDE = "2020-01-01"
 SIM_END_OVERRIDE   = "2024-12-31"
 TESTER_MAIN  = PROJECT_ROOT / "engine" / "tester.py"
-REPORT_JSON  = PROJECT_ROOT / "reports" / "portfolio_report.json"
-REPORT_TXT   = PROJECT_ROOT / "reports" / "portfolio_report.txt"
-CHANGE_LOG   = PROJECT_ROOT / "logs"    / "change_log.txt"
-FEATURE_CACHE_DB = PROJECT_ROOT / "data" / "feature_cache.db"
-OPP_REPORT   = PROJECT_ROOT / "logs"    / "opportunity_report.txt"
-PARAMS_HIST  = PROJECT_ROOT / "logs"    / "params_history.json"
+REPORT_JSON  = REPORTS_DIR / "portfolio_report.json"
+REPORT_TXT   = REPORTS_DIR / "portfolio_report.txt"
+CHANGE_LOG   = LOGS_DIR    / "change_log.txt"
+OPP_REPORT   = LOGS_DIR    / "opportunity_report.txt"
+PARAMS_HIST  = LOGS_DIR    / "params_history.json"
 
 # ============================================================================
 #  MODELS AND APPROXIMATE COSTS  (USD per 1M tokens)
@@ -735,11 +740,9 @@ def _load_oos_sample(n_executed=15, n_gate_rejected=10, n_dodged=5):
 
     # --- GATE_REJECTED missed winners + dodged losers from cache ---
     if not FEATURE_CACHE_DB.exists():
-        result["cache_warn"] = (
-            "feature_cache.db not found -- run data_pipeline/build_feature_cache.py first. "
-            "Agent 1 will operate on executed trades only."
+        raise FileNotFoundError(
+            f"Feature cache database not found: {FEATURE_CACHE_DB.resolve()}"
         )
-        return result
 
     try:
         conn = _sqlite3.connect(str(FEATURE_CACHE_DB))

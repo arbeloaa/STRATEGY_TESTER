@@ -57,7 +57,11 @@ except ImportError:
     _NDL_AVAILABLE = False
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # data_pipeline/
+
+from config.paths import DATA_DIR
 
 from data_fetcher import (
     compute_fundamentals_at,

@@ -18,15 +18,16 @@ import sqlite3
 import json
 import os
 from datetime import date as _date, datetime as _datetime
+import sys
 from pathlib import Path
 
-import pandas as pd
-
-# ---------------------------------------------------------------------------
-# Default DB path
-# ---------------------------------------------------------------------------
+# Setup system path to import from config
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
-_DEFAULT_DB   = str(_PROJECT_ROOT / "data" / "market_data.db")
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
+from config.paths import MARKET_DATA_DB
+import pandas as pd
 
 _SCHEMA_VERSION = "1"
 
@@ -35,9 +36,13 @@ _SCHEMA_VERSION = "1"
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _connect(db_path=None):
+def _connect(db_path=None, check_exists=True):
     """Return a new sqlite3 connection with WAL mode and foreign-key support."""
-    path = db_path or _DEFAULT_DB
+    path = Path(db_path or MARKET_DATA_DB)
+    if check_exists and not path.exists():
+        raise FileNotFoundError(
+            f"Market data database not found: {path.resolve()}"
+        )
     os.makedirs(os.path.dirname(path), exist_ok=True)
     conn = sqlite3.connect(path)
     conn.execute("PRAGMA journal_mode=WAL")
@@ -59,7 +64,7 @@ def init_db(db_path=None):
     Safe to call on every run (idempotent).
     """
     try:
-        conn = _connect(db_path)
+        conn = _connect(db_path, check_exists=False)
         c = conn.cursor()
 
         c.executescript("""

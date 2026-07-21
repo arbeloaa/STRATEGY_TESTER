@@ -20,12 +20,17 @@ Usage:
 import sys, json, subprocess, argparse, time
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SIMULATOR    = PROJECT_ROOT / "engine" / "portfolio_simulator.py"
-REPORT_JSON  = PROJECT_ROOT / "reports" / "portfolio_report.json"
-
+# Add project root to sys.path
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # optimizers/
+
+from config.paths import PROJECT_ROOT, REPORTS_DIR
 from auto_optimizer import compute_fitness
+
+SIMULATOR    = PROJECT_ROOT / "engine" / "portfolio_simulator.py"
+REPORT_JSON  = REPORTS_DIR / "portfolio_report.json"
 
 # Distinct market regimes within the project's usable data range (most tickers
 # have reliable price/fundamentals coverage from ~2020 onward -- see

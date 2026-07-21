@@ -40,23 +40,29 @@ except ImportError:
     _ANTHROPIC_OK = False
     _anthropic = None
 
+# Add project root to sys.path
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # optimizers/
 import walk_forward as _wf
 
 # ============================================================================
 #  PATHS
 # ============================================================================
-PROJECT_ROOT      = Path(__file__).resolve().parents[1]
+from config.paths import PROJECT_ROOT, CONFIG_DIR, REPORTS_DIR, LOGS_DIR
+
 SIMULATOR         = PROJECT_ROOT / "engine"     / "portfolio_simulator.py"
 PREP_SCRIPT       = PROJECT_ROOT / "optimizers" / "trade_analyzer_prep.py"
-PARAMS_JSON       = PROJECT_ROOT / "config"     / "strategy_params.json"
-CURRENT_BEST_JSON = PROJECT_ROOT / "config"     / "current_best_params.json"
-SAMPLED_TRADES    = PROJECT_ROOT / "reports"    / "sampled_trades.json"
-REPORT_JSON       = PROJECT_ROOT / "reports"    / "portfolio_report.json"
-REPORT_TXT        = PROJECT_ROOT / "reports"    / "portfolio_report.txt"
-PARAMS_HISTORY    = PROJECT_ROOT / "logs"       / "params_history.json"
-CHANGE_LOG        = PROJECT_ROOT / "logs"       / "change_log.txt"
-VERDICTS_DIR      = PROJECT_ROOT / "logs"       / "trade_verdicts"
+PARAMS_JSON       = CONFIG_DIR   / "strategy_params.json"
+CURRENT_BEST_JSON = CONFIG_DIR   / "current_best_params.json"
+SAMPLED_TRADES    = REPORTS_DIR  / "sampled_trades.json"
+REPORT_JSON       = REPORTS_DIR  / "portfolio_report.json"
+REPORT_TXT        = REPORTS_DIR  / "portfolio_report.txt"
+PARAMS_HISTORY    = LOGS_DIR     / "params_history.json"
+CHANGE_LOG        = LOGS_DIR     / "change_log.txt"
+VERDICTS_DIR      = LOGS_DIR     / "trade_verdicts"
+WF_BASELINES_FILE = LOGS_DIR     / "wf_baselines.json"
 
 SIM_START = "2020-01-01"
 SIM_END   = "2024-12-31"
@@ -64,9 +70,52 @@ SIM_END   = "2024-12-31"
 # Last confirmed-reproducible best fitness. Used as the floor for best_ever, which is
 # computed dynamically at session start as max(this, current_best_fitness) so it rises
 # automatically with every real improvement and never needs manual editing again.
-# Updated to 64.89 on 2026-07-02: 2020-2024 run post regime_exposure_cap fix
-# (total_return=+113.97%, sharpe=0.79 -> fitness = 113.97*0.5 + 0.79*20*0.5 = 64.89).
-BEST_FITNESS_EVER_OVERRIDE = 64.89
+# Updated to 67.745 on 2026-07-20: gm_relative@p50 structural KEEP
+# (total_return=+119.29%, sharpe=0.81 -> fitness = 119.29*0.5 + 0.81*20*0.5 = 67.745).
+BEST_FITNESS_EVER_OVERRIDE = 67.745
+
+# Load-bearing param values for the 67.745 verified state (gm_relative@p50 structural KEEP,
+# 2026-07-20). Session-start verify asserts the restored current_best_params.json against
+# these -- a silent drift here (e.g. trailing_stop_pct 0.155 -> 0.17) previously passed
+# because the old print only echoed whatever was in the file instead of checking it against
+# a fixed reference. Update this dict only when a new baseline is verified and committed.
+VERIFIED_BASELINE_PARAMS = {
+    "exits.trailing_stop_pct":     0.155,
+    "exits.take_profit_pct":       0.75,
+    "exits.below_ma_trend_floor":  0.085,
+    "gates.gm_tops.solar_hw":      50,
+    "gates.gm_relative.enabled":   True,
+    "gates.gm_relative.percentile": 50,
+}
+
+
+def _get_by_path(d, dotted_path):
+    node = d
+    for key in dotted_path.split("."):
+        node = node[key]
+    return node
+
+
+def verify_baseline_params(params):
+    """Hard-fail if any load-bearing param differs from the verified 67.745 baseline.
+    Raises SystemExit(1) on mismatch rather than just printing -- a param that's wrong
+    here invalidates every fitness number the rest of the session prints."""
+    mismatches = []
+    for path, expected in VERIFIED_BASELINE_PARAMS.items():
+        actual = _get_by_path(params, path)
+        if actual != expected:
+            mismatches.append((path, expected, actual))
+    if mismatches:
+        print("  [BEST] FATAL: current_best_params.json does not match the verified "
+              f"{BEST_FITNESS_EVER_OVERRIDE:.3f} baseline:")
+        for path, expected, actual in mismatches:
+            print(f"    {path}: expected {expected!r}, found {actual!r}")
+        print("  Fix config/current_best_params.json (and config/strategy_params.json) "
+              "before running -- refusing to run on an unverified baseline.")
+        sys.exit(1)
+    print(f"  [BEST] Verified against {BEST_FITNESS_EVER_OVERRIDE:.3f} baseline: "
+          + ", ".join(f"{path.split('.')[-1]}={expected!r}"
+                       for path, expected in VERIFIED_BASELINE_PARAMS.items()))
 
 PARAMETER_FAMILIES = {
     "MA_exit_sensitivity": {
@@ -149,12 +198,35 @@ PARAMETER_FAMILIES = {
 # ============================================================================
 #  WALK-FORWARD SETTINGS
 # ============================================================================
-WALK_FORWARD_CHECK_EVERY      = 3    # run after every Nth kept change
-WALK_FORWARD_SPREAD_TOLERANCE = 8.0  # revert kept change if spread worsens by more than this
+WALK_FORWARD_CHECK_EVERY = 3      # run after every Nth kept change
+
+# Per-regime floor rule (replaces the direction-blind spread-ceiling check).
+# A WF-triggered keep is REVERTED if ANY of these fail:
+#   (a) full-window fitness >= current best              [enforced by normal fitness gate]
+#   (b) every period fitness >= its baseline - WF_PERIOD_FLOOR_MARGIN
+#   (c) avg WF fitness >= baseline avg
+# Baseline references are stored in logs/wf_baselines.json and updated on every
+# structural KEEP so future sessions inherit the correct floors.
+WF_PERIOD_FLOOR_MARGIN = 3.0
+
+WF_BASELINES_FILE = None   # set after LOGS_DIR is available (see below)
 
 _walk_forward_cache   = None    # dict from last run_walk_forward_check(), or None
 _historian_summary    = None    # set by run_historian() once per session, before iteration 1
 _current_best_fitness = 0.0     # fitness of current_best_params.json; updated on every KEEP
+
+# Default per-regime WF baseline references (overridden by wf_baselines.json if present).
+# Updated whenever a structural KEEP changes the per-period performance profile.
+_DEFAULT_WF_BASELINES = {
+    "periods": {
+        "2020-2021_covid_bull": 58.08,
+        "2022_bear":            -24.73,
+        "2023_recovery":        10.86,
+        "2024_mixed":           12.75,
+    },
+    "avg": 14.24,
+}
+_wf_baselines = None   # loaded lazily from wf_baselines.json or from _DEFAULT_WF_BASELINES
 
 # ============================================================================
 #  MODELS
@@ -251,13 +323,19 @@ def run_simulator(timeout=1800):
         return False, str(exc)
 
 
-def run_prep(analysis_report=None, timeout=300):
-    """Re-run trade_analyzer_prep.py to refresh sampled_trades.json."""
+def run_prep(analysis_report=None, timeout=300, n_sample=None):
+    """Re-run trade_analyzer_prep.py to refresh sampled_trades.json.
+
+    n_sample: if provided, passes --n <n_sample> to the prep script so the trade
+              batch is reduced (e.g. 20 instead of 30) for large OOS reports.
+    """
     print("  [PREP] Running trade_analyzer_prep.py ...", flush=True)
     t0 = time.time()
     cmd = [sys.executable, str(PREP_SCRIPT)]
     if analysis_report:
         cmd += ["--analysis-report", str(analysis_report)]
+    if n_sample is not None:
+        cmd += ["--n", str(n_sample)]
     try:
         result = subprocess.run(
             cmd,
@@ -394,6 +472,99 @@ def append_params_history(entry):
     history.append(entry)
     with open(PARAMS_HISTORY, "w") as f:
         json.dump(history, f, indent=2)
+
+
+# ============================================================================
+#  WALK-FORWARD BASELINE MANAGEMENT
+# ============================================================================
+
+def load_wf_baselines():
+    """
+    Load per-regime WF baseline references from wf_baselines.json.
+    Falls back to _DEFAULT_WF_BASELINES if the file is absent or corrupt.
+    Returns a dict: {"periods": {label: fitness, ...}, "avg": float}.
+    Caches result in _wf_baselines module global.
+    """
+    global _wf_baselines
+    if _wf_baselines is not None:
+        return _wf_baselines
+    if WF_BASELINES_FILE.exists():
+        try:
+            with open(WF_BASELINES_FILE) as f:
+                _wf_baselines = json.load(f)
+            print(f"  [WF-BASE] Loaded baselines from {WF_BASELINES_FILE.name}: "
+                  f"avg={_wf_baselines.get('avg', '?'):.4f}  "
+                  f"periods={_wf_baselines['periods']}")
+            return _wf_baselines
+        except Exception as exc:
+            print(f"  [WF-BASE] WARNING: {WF_BASELINES_FILE}: {exc} -- using defaults")
+    _wf_baselines = dict(_DEFAULT_WF_BASELINES)
+    print(f"  [WF-BASE] Using default baselines: avg={_wf_baselines['avg']}  "
+          f"periods={_wf_baselines['periods']}")
+    return _wf_baselines
+
+
+def save_wf_baselines(period_results):
+    """
+    Update wf_baselines.json from a walk-forward period_results dict
+    (label -> metrics dict with 'fitness' key, or None for failed runs).
+    Called only after a structural KEEP passes all three WF gates.
+    """
+    global _wf_baselines
+    new_periods = {lbl: r["fitness"]
+                   for lbl, r in period_results.items() if r is not None}
+    fitnesses   = list(new_periods.values())
+    new_avg     = round(sum(fitnesses) / len(fitnesses), 4) if fitnesses else 0.0
+    _wf_baselines = {"periods": new_periods, "avg": new_avg}
+    WF_BASELINES_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(WF_BASELINES_FILE, "w") as f:
+        json.dump(_wf_baselines, f, indent=2)
+    print(f"  [WF-BASE] Baselines updated -> avg={new_avg:.4f}  periods={new_periods}")
+
+
+def check_wf_floors(wf_info):
+    """
+    Three-gate per-regime-floor robustness check (replaces the direction-blind
+    spread-ceiling rule).
+
+    Gates applied:
+      (a) full-window fitness >= current best  [enforced upstream by standard fitness gate]
+      (b) every WF period fitness >= baseline_fitness - WF_PERIOD_FLOOR_MARGIN (3.0)
+      (c) average WF fitness >= baseline average
+
+    Returns (passed: bool, failed_reasons: list[str]).
+    failed_reasons is empty on pass; contains human-readable failure lines on fail.
+    """
+    baselines    = load_wf_baselines()
+    base_periods = baselines["periods"]
+    base_avg     = baselines["avg"]
+    per_period   = wf_info.get("per_period", {})   # label -> fitness float
+
+    failed = []
+
+    # Gate (b): per-period floors
+    for label, base_fitness in base_periods.items():
+        floor  = base_fitness - WF_PERIOD_FLOOR_MARGIN
+        actual = per_period.get(label)
+        if actual is None:
+            failed.append(f"GATE-B: {label} did not run (no result)")
+            continue
+        if actual < floor:
+            failed.append(
+                f"GATE-B: {label} actual={actual:.4f} < floor={floor:.4f} "
+                f"(base={base_fitness:.2f}, delta={actual - base_fitness:+.2f})"
+            )
+
+    # Gate (c): average fitness
+    fitnesses  = [v for v in per_period.values() if v is not None]
+    actual_avg = round(sum(fitnesses) / len(fitnesses), 4) if fitnesses else 0.0
+    if actual_avg < base_avg:
+        failed.append(
+            f"GATE-C: avg {actual_avg:.4f} < baseline avg {base_avg:.4f} "
+            f"(delta={actual_avg - base_avg:+.4f})"
+        )
+
+    return (len(failed) == 0), failed
 
 
 def _params_history_summary(history, max_entries=15):
@@ -547,9 +718,20 @@ at entry, pre-entry price trend (30-day window), regime at entry, a forward pric
 path (entry + 3 months, pre-computed), and post-exit price path (up to 120 calendar
 days after the sell).
 
-Your task: for each trade produce a two-axis ENTRY verdict (decision quality ×
-stock outcome → verdict_matrix) and a separate EXIT verdict. Aggregate signals into
-entry_signals (gate parameters) and exit_signals (exit parameters).
+Each narrative also now contains a TIMING ANALYSIS block that shows:
+  - Pre-entry 30d price path (the month before the buy)
+  - Optimal entry date/price (lowest price in pre-30d + first 15 trading days of hold)
+  - Post-sell 30d price path (the month after the sell)
+  - Optimal exit date/price (highest price in hold period + post-30d window)
+  - Entry timing gap % (how much above optimal the actual entry was)
+  - Exit timing gap % (how much below optimal the actual exit was)
+  - Peak in hold period (for SOLD_TOO_LATE detection)
+  - Timing verdict: BOUGHT_TOO_EARLY | SOLD_TOO_EARLY | SOLD_TOO_LATE | TIMING_OK
+
+Your task: for each trade produce a two-axis ENTRY verdict (decision quality x
+stock outcome -> verdict_matrix), a separate EXIT verdict, and a TIMING verdict.
+Aggregate signals into entry_signals (gate parameters), exit_signals (exit parameters),
+and timing_signals (gate blame from timing faults).
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 EXIT ANALYSIS
@@ -566,24 +748,24 @@ Assign one exit_parameter_signal with valid paths from:
   exits.gm_erosion_noncyc_thr
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-ENTRY ANALYSIS  (two-axis: decision quality × stock outcome)
+ENTRY ANALYSIS  (two-axis: decision quality x stock outcome)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Axis 1 — entry_decision_quality: judge using ONLY information visible at entry
+Axis 1 -- entry_decision_quality: judge using ONLY information visible at entry
 (pass margin, pre-entry trend, regime). HINDSIGHT FORBIDDEN here.
-  GOOD     -- uptrend or clean base, comfortable pass margin (≥+0.30), regime
+  GOOD     -- uptrend or clean base, comfortable pass margin (>=+0.30), regime
               appropriate for the strategy
   MARGINAL -- some warning sign present: low pass margin, mild regime concern,
               flat or choppy pre-entry trend
   BAD      -- clear red flags: very low pass margin, strong regime mismatch,
               obvious pre-entry weakness or overextension
 
-Axis 2 — stock_outcome: use the "Forward path from entry" line in the narrative.
+Axis 2 -- stock_outcome: use the "Forward path from entry" line in the narrative.
 Hindsight is allowed here -- this measures what the stock actually did.
   HAD_POTENTIAL -- Forward 3m change from entry > +15%
   WEAK          -- Forward 3m change from entry < -10%
   FLAT          -- everything else (-10% to +15%)
 
-verdict_matrix — derived from the two axes plus pnl_pct:
+verdict_matrix -- derived from the two axes plus pnl_pct:
   EXIT_DESTROYED_GOOD_PICK  -- GOOD + HAD_POTENTIAL + pnl_pct < 0
                                The entry was right, the stock had room, but the exit
                                fired too early. Exit-side signal. Cite the specific
@@ -643,7 +825,88 @@ A loser with GOOD entry and WEAK stock is UNLUCKY_PICK -- do not fabricate an
 entry gate failure for market/stock-specific risk that no gate could address.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-AGGREGATION (separate entry and exit signal groups)
+TIMING ANALYSIS  (parse the "TIMING ANALYSIS:" block in each narrative)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+For every trade, read the TIMING ANALYSIS block and produce a timing_analysis object.
+
+TIMING VERDICTS and what to do with each:
+
+CRITICAL OUTCOME FILTER -- applies before ANY timing blame is assigned:
+  This strategy's engine trades dip a median ~11% (IS) / ~17% (OOS) in their first
+  15 days and then recover to large gains. "Bought early, then won big" is the
+  strategy's designed behavior, not a defect. The TSM COVID entry (-27.7% dip,
+  then +90%) is the prototype. Flagging winner dips as BOUGHT_TOO_EARLY and
+  blaming the gate that admitted them would teach Agent 2 to block its best trades.
+
+  RULE: If pnl_pct >= 0 OR stock_outcome == HAD_POTENTIAL:
+    - Set entry_timing_verdict = "BOUGHT_EARLY_BUT_WON" (if BOUGHT_TOO_EARLY applies
+      based on price alone) or TIMING_OK (if no gap)
+    - Set timing_blame_gate = null, timing_blame_direction = null
+    - Do NOT include this trade in gate_blame_tally
+    - You may still note the entry gap % factually, but no blame is assigned
+  This filter applies ONLY to the entry timing verdict. Exit timing (SOLD_TOO_EARLY,
+  SOLD_TOO_LATE) is evaluated independently of trade outcome.
+
+BOUGHT_TOO_EARLY (entry was above vol-aware threshold relative to optimal -- and trade
+                   was a LOSER with WEAK stock outcome):
+  The strategy let the trader in too soon. The stock dipped after the buy and
+  did NOT recover. This is a gate-quality failure.
+  Blame: Find the gate with the SMALLEST positive pass margin at entry (the gate
+  closest to NOT passing). That is the gate that, with a slight tightening, would
+  have delayed or blocked the entry until after the dip. Set timing_blame_gate to
+  that gate's path. Set timing_blame_direction to "raise" (tighten).
+  If all gates passed with comfortable margin (>+0.50), set timing_blame_gate to
+  "NO_EXISTING_LEVER" -- timing was driven by market conditions, not gate permissiveness.
+  Reasoning must cite: the specific entry gap %, the days before optimal, and the
+  gate margin that was smallest.
+
+SOLD_TOO_EARLY (exit was above vol-aware threshold below optimal price in hold + post-30d,
+                and optimal exit date was AFTER actual exit):
+  The exit mechanism fired too soon; the stock kept rising after the sell.
+  Blame: The specific exit mechanism named in exit_reason. Corroborate with the
+  exit_parameter_signal already generated in the EXIT ANALYSIS section.
+  Set timing_blame_gate to the exit parameter path (e.g. "exits.below_ma_trend_floor").
+  Set timing_blame_direction to "raise" (loosen the exit threshold).
+  Reasoning must cite: the exit gap %, the days before optimal exit, and the
+  exit reason that triggered.
+
+SOLD_TOO_LATE (peak inside hold was above vol-aware threshold above exit price,
+               peak date was before exit):
+  The stock peaked well before exit; the trail-stop or MA exit was too slow.
+  Blame: exits.trailing_stop_pct (if the peak-to-exit drop exceeded the trailing stop
+  threshold) or exits.below_ma_trend_floor (if exit was MA-triggered).
+  Set timing_blame_direction to "lower" (tighten the exit to capture more of the peak).
+  Reasoning must cite: the peak price, peak date, exit price, and the % left on the table.
+
+TIMING_OK: No meaningful timing fault. Set timing_blame_gate to null.
+
+BAD_STOCK scenario (stock was weak across the ENTIRE window: pre-30d, hold, and post-30d):
+  This is diagnosed separately. If the pre-entry 30d path shows a declining trend
+  AND the Forward 3m change is < -10% (WEAK outcome), AND the post-sell 30d also
+  shows continued weakness: the strategy bought a stock with no potential.
+  Blame: The valuation/quality gates that were most permissive:
+    - G1 (P/S ratio): if the stock's sector-specific P/S was near the cap, cite
+      "gates.gm_tops.{sector}" or "NO_EXISTING_LEVER" if no P/S gate applies
+    - G3 (Rule of 40): if the gate_margins show Rule40 score was the weakest,
+      cite "NO_EXISTING_LEVER" with reasoning "Rule40 gate was insufficient for this sector"
+  Set timing_blame_gate to the weakest quality gate path, or "NO_EXISTING_LEVER"
+  with a structural description if no existing gate would have caught this.
+
+Output per-trade timing_analysis object:
+  {
+    "entry_timing_verdict": "BOUGHT_TOO_EARLY",   // or BOUGHT_EARLY_BUT_WON or TIMING_OK
+    "entry_gap_pct": 9.5,                         // from narrative; 0.0 if TIMING_OK
+    "exit_timing_verdict": "SOLD_TOO_EARLY",      // or SOLD_TOO_LATE or TIMING_OK
+    "exit_gap_pct": -12.4,                        // negative = sold below optimal
+    "peak_in_hold_pct_above_exit": 8.3,           // % the hold peak was above exit price; 0 if N/A
+    "is_bad_stock": false,                         // true if weak across entire window
+    "timing_blame_gate": "gates.conviction_thresholds.high_margin",
+    "timing_blame_direction": "raise",            // "raise", "lower", or null
+    "timing_blame_reasoning": "Barely-passing gate (margin +0.08) let entry through 8 days before the dip bottom; stock was a loser (pnl -6.2%) with WEAK outcome; tightening would have delayed signal past worst entry point."
+  }
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+AGGREGATION (separate entry, exit, and timing signal groups)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Confidence thresholds (applied independently to each group):
   HIGH   = parameter flagged in 5+ trades
@@ -661,6 +924,27 @@ entry_signals: aggregate entry_parameter_signal.path values from GATE_LEAK trade
   UNLUCKY_PICK, NEUTRAL).
 
 exit_signals: aggregate exit_parameter_signal.path values (3+ occurrences).
+
+timing_signals: aggregate timing_blame_gate values, BUT ONLY from trades where
+  timing_blame_gate is NOT null (i.e., outcome-filtered loser trades for entry blame;
+  exit blame from SOLD_TOO_EARLY / SOLD_TOO_LATE applies regardless of outcome).
+  Trades with entry_timing_verdict == "BOUGHT_EARLY_BUT_WON" are EXCLUDED from
+  gate_blame_tally -- winner dips must not inflate entry gate blame counts.
+  Only include gates with 3+ blame assignments (LOW threshold omitted).
+  Include counts by scenario:
+    "bought_too_early_count": trades with entry_timing_verdict == BOUGHT_TOO_EARLY
+      (excludes BOUGHT_EARLY_BUT_WON -- those were winners and are informational only)
+    "bought_early_but_won_count": trades with entry_timing_verdict == BOUGHT_EARLY_BUT_WON
+      (informational -- shows how often the strategy dips-then-wins)
+    "sold_too_early_count": total trades with exit_timing_verdict == SOLD_TOO_EARLY
+    "sold_too_late_count": total trades with exit_timing_verdict == SOLD_TOO_LATE
+    "bad_stock_no_lever_count": total is_bad_stock == true trades
+  "gate_blame_tally": dict of gate_path -> count of timing blame assignments
+    (entry blame: losers only; exit blame: all trades regardless of outcome)
+  "most_blamed_gate": gate path with highest tally (or null if no gate reached 3+)
+  Note: timing_signals is INDEPENDENT of entry_signals/exit_signals -- a gate can appear
+  in both. Timing blame targets the "loosest" gate for early-entry (losers only); entry
+  blame targets the "most permissive" gate pattern across GATE_LEAK trades.
 
 top_signal = whichever of top_entry_signal / top_exit_signal has the higher count.
 
@@ -689,6 +973,17 @@ Output ONLY valid JSON matching this exact schema (no text before or after):
         "suggested_value": 0.09,
         "confidence": "HIGH",
         "reasoning": "Exited on weak MA signal then stock rose +30.4% over 120 days; threshold too sensitive"
+      },
+      "timing_analysis": {
+        "entry_timing_verdict": "BOUGHT_TOO_EARLY",
+        "entry_gap_pct": 9.5,
+        "exit_timing_verdict": "SOLD_TOO_EARLY",
+        "exit_gap_pct": -12.4,
+        "peak_in_hold_pct_above_exit": 0.0,
+        "is_bad_stock": false,
+        "timing_blame_gate": "gates.regime_adjustments.BEAR_VOLATILE",
+        "timing_blame_direction": "raise",
+        "timing_blame_reasoning": "Entry occurred 8 days before optimal low; the regime gate had the smallest margin (+0.01) among all passing gates. Tightening BEAR_VOLATILE threshold by 0.3 would have delayed entry past the dip. Exit fired too early; stock rose +12.4% after sell via BELOW_MA_DECLINING."
       }
     },
     {
@@ -727,6 +1022,17 @@ Output ONLY valid JSON matching this exact schema (no text before or after):
         "suggested_value": 5,
         "confidence": "LOW",
         "reasoning": "Very short hold but exit was appropriate given volatility; minimal impact expected"
+      },
+      "timing_analysis": {
+        "entry_timing_verdict": "TIMING_OK",
+        "entry_gap_pct": 1.2,
+        "exit_timing_verdict": "TIMING_OK",
+        "exit_gap_pct": -2.1,
+        "peak_in_hold_pct_above_exit": 0.0,
+        "is_bad_stock": true,
+        "timing_blame_gate": "NO_EXISTING_LEVER",
+        "timing_blame_direction": null,
+        "timing_blame_reasoning": "Stock was weak across the entire window (pre-30d declining, hold declining, post-30d flat). No existing gate targets this type of prolonged fundamental weakness; would require a price-trend gate checking momentum over 60+ days."
       }
     }
   ],
@@ -767,6 +1073,21 @@ Output ONLY valid JSON matching this exact schema (no text before or after):
       "never_tried_before": true
     }
   },
+  "timing_signals": {
+    "bought_too_early_count": 2,
+    "bought_early_but_won_count": 7,
+    "sold_too_early_count": 4,
+    "sold_too_late_count": 2,
+    "bad_stock_no_lever_count": 3,
+    "gate_blame_tally": {
+      "gates.conviction_thresholds.high_margin": 3,
+      "exits.below_ma_trend_floor": 4,
+      "NO_EXISTING_LEVER": 3
+    },
+    "most_blamed_gate": "exits.below_ma_trend_floor",
+    "most_blamed_gate_count": 4,
+    "most_blamed_gate_confidence": "MEDIUM"
+  },
   "top_entry_signal": "gates.regime_adjustments.BEAR_VOLATILE",
   "top_entry_signal_count": 8,
   "top_entry_signal_confidence": "HIGH",
@@ -779,14 +1100,19 @@ Output ONLY valid JSON matching this exact schema (no text before or after):
 }
 
 Rules:
-- Every trade_verdict must have entry_decision_quality, stock_outcome, verdict_matrix, entry_reasoning, and exit_parameter_signal
+- Every trade_verdict must have entry_decision_quality, stock_outcome, verdict_matrix, entry_reasoning, exit_parameter_signal, AND timing_analysis
 - entry_parameter_signal is required ONLY when verdict_matrix == "GATE_LEAK"; omit for EXIT_DESTROYED_GOOD_PICK, UNLUCKY_PICK, LUCKY_PASS, NEUTRAL
 - entry_mistake is required ONLY when verdict_matrix == "GATE_LEAK"; omit for all other verdict_matrix values
 - entry_mistake.identified must be true ONLY when the gate margin + outcome chain is unambiguous in the provided data; use false otherwise
+- timing_analysis is REQUIRED for every trade regardless of verdict_matrix
+- timing_analysis.timing_blame_gate: for BOUGHT_TOO_EARLY (loser + WEAK) use the gate with smallest positive margin; for SOLD_TOO_EARLY use the exit mechanism path; for SOLD_TOO_LATE use exits.trailing_stop_pct or exits.below_ma_trend_floor; for TIMING_OK or BOUGHT_EARLY_BUT_WON set to null; for BAD_STOCK set to weakest quality gate or NO_EXISTING_LEVER
+- OUTCOME FILTER: if pnl_pct >= 0 OR stock_outcome == HAD_POTENTIAL, set entry_timing_verdict to BOUGHT_EARLY_BUT_WON (if gap detected) or TIMING_OK, and set timing_blame_gate = null -- winner dips are the strategy's signature, not gate failures
+- is_bad_stock = true ONLY when pre-entry 30d path is declining AND Forward 3m change < -10% AND post-sell 30d is also flat or declining
 - entry_signals aggregates entry_parameter_signal.path from GATE_LEAK trades (3+ occurrences); include NO_EXISTING_LEVER group if 3+ trades have that path
 - entry_signals.mistake_summary counts identified:true GATE_LEAK entries grouped by gate_responsible plus "unidentified" count
 - entry_signals.verdict_matrix_summary counts each verdict_matrix value across ALL trades
 - exit_signals aggregates exit_parameter_signal.path (3+ occurrences)
+- timing_signals.gate_blame_tally aggregates timing_blame_gate values only from trades where timing_blame_gate is NOT null; BOUGHT_EARLY_BUT_WON trades are EXCLUDED (3+ occurrences threshold)
 - never_tried_before is always set to true (Agent 2 will verify against history)
 - top_signal = whichever of top_entry_signal / top_exit_signal has the higher count
 - Use only valid paths from the lists above for each signal type
@@ -806,8 +1132,18 @@ def _strip_fences(text):
 
 
 def _call_anthropic(model, max_tokens, system, user):
-    """Stream a single messages request; return (text, input_tokens, output_tokens)."""
-    client = _anthropic.Anthropic()
+    """Stream a single messages request; return (text, input_tokens, output_tokens).
+
+    Uses an explicit 600-second read timeout so large Agent 1 prompts (30-trade
+    batches with timing-analysis blocks) don't hit the SDK default.
+    """
+    try:
+        import httpx as _httpx
+        _timeout = _httpx.Timeout(600.0, connect=10.0)
+        client = _anthropic.Anthropic(timeout=_timeout)
+    except Exception:
+        # httpx not available or older SDK version -- fall back to scalar timeout
+        client = _anthropic.Anthropic(timeout=600.0)
     text_parts = []
     with client.messages.stream(
         model=model,
@@ -878,6 +1214,26 @@ def run_trade_analyst(trades_json_path):
         f"Report generated: {sampled['generated_at']}\n\n"
         f"TRADE BATCH:\n\n{narratives}"
     )
+
+    # ── Token-size check ──────────────────────────────────────────────────────
+    _system_chars = len(_ANALYST_SYSTEM)
+    _user_chars   = len(user_text)
+    _total_chars  = _system_chars + _user_chars
+    _est_tokens   = _total_chars // 4
+    print(
+        f"  [AGENT 1] Prompt size estimate: "
+        f"system={_system_chars} chars  user={_user_chars} chars  "
+        f"total={_total_chars} chars  ~{_est_tokens:,} tokens",
+        flush=True,
+    )
+    if _est_tokens > 150_000:
+        print(
+            f"  [AGENT 1] WARNING: estimated prompt ({_est_tokens:,} tokens) exceeds "
+            f"150K token threshold. Consider re-running with --analysis-sample 20 to "
+            f"reduce the trade batch from {sampled['n_sampled']} to 20 trades.",
+            flush=True,
+        )
+    # ─────────────────────────────────────────────────────────────────────────
 
     try:
         text, in_tok, out_tok = _call_anthropic(
@@ -1100,17 +1456,17 @@ tester.py contains sector-specific hardcoded thresholds that are NOT tunable thr
 this system -- never propose paths not in the actionable list.
 
 ENTRY vs EXIT SIGNALS:
-  Agent 1 now provides a two-axis entry verdict (entry_decision_quality × stock_outcome
-  → verdict_matrix) and entry_signals / exit_signals as separate evidence classes.
+  Agent 1 now provides a two-axis entry verdict (entry_decision_quality x stock_outcome
+  -> verdict_matrix) and entry_signals / exit_signals as separate evidence classes.
 
-  VERDICT MATRIX SUMMARY — read this first to understand the signal mix:
-    EXIT_DESTROYED_GOOD_PICK: good entry + stock had potential + trade lost → exit problem
+  VERDICT MATRIX SUMMARY -- read this first to understand the signal mix:
+    EXIT_DESTROYED_GOOD_PICK: good entry + stock had potential + trade lost -> exit problem
       These counts feed exit_signals. A high count here means exit is the main issue.
-    GATE_LEAK: bad/marginal entry + weak stock → gate was too permissive
+    GATE_LEAK: bad/marginal entry + weak stock -> gate was too permissive
       Only GATE_LEAK trades generate entry_parameter_signals. Use these to justify gate changes.
-    UNLUCKY_PICK: good entry + weak stock → no lever exists; stock was just bad
+    UNLUCKY_PICK: good entry + weak stock -> no lever exists; stock was just bad
       Do NOT respond to UNLUCKY_PICK with gate tightening -- you would block good entries.
-    LUCKY_PASS: bad entry + stock had potential → gate was lax but stock recovered
+    LUCKY_PASS: bad entry + stock had potential -> gate was lax but stock recovered
       Interesting for future structural work but NOT an immediate tuning signal.
     NEUTRAL: winning trades and flat-stock outcomes -- not actionable.
 
@@ -1125,6 +1481,48 @@ MISTAKE SUMMARY (from entry_signals.mistake_summary):
   - A high "unidentified" count means GATE_LEAK losses lack a clear addressable gate.
     Do NOT respond to unidentified losses by tightening arbitrary gates -- this
     sacrifices good entries without fixing the underlying cause.
+
+TIMING SIGNALS (from timing_signals -- INDEPENDENT corroborating evidence):
+  Agent 1 also provides timing_signals derived from comparing actual buy/sell dates
+  against optimal buy/sell dates in a 3-window analysis (pre-30d, hold, post-30d).
+  This is separate from and INDEPENDENT of the entry/exit gate signals above.
+
+  How to use timing_signals:
+
+  timing_signals.most_blamed_gate: the gate most frequently identified as the cause
+    of timing faults -- entry blame is ONLY from loser trades (pnl < 0 AND WEAK stock);
+    exit blame (SOLD_TOO_EARLY / SOLD_TOO_LATE) applies regardless of outcome.
+    Use this as CORROBORATING evidence:
+    - If most_blamed_gate matches the top_entry_signal or top_exit_signal, that is
+      STRONG confirmation -- both the gate-quality analysis and the timing analysis
+      point at the same parameter. Prioritize it.
+    - If most_blamed_gate points at a DIFFERENT parameter than entry_signals, treat
+      it as supplementary evidence only -- do not override the primary gate signal.
+
+  timing_signals scenario counts:
+    bought_too_early_count > 3: loser trades where entry was too early (stock dipped
+      and did NOT recover). This is genuine gate-quality evidence -- corroborates gate
+      tightening. NOTE: winner trades that dipped-then-won are in bought_early_but_won_count
+      and are EXCLUDED from this count and from gate_blame_tally.
+    bought_early_but_won_count: trades where the strategy bought "too early" by price
+      but the trade was profitable or the stock had potential. This is the strategy's
+      SIGNATURE behavior (engine trades dip ~11% IS / ~17% OOS then recover). A high
+      bought_early_but_won_count is GOOD -- it shows the strategy is capturing
+      momentum breakouts correctly. Do NOT interpret this as a gate problem.
+    sold_too_early_count > 3: exit thresholds are too tight; the strategy sells
+      before the stock has peaked. Corroborates exit-loosening proposals.
+    sold_too_late_count > 3: exits are too slow to capture peaks; trail-stop or MA
+      exit thresholds are too loose. Corroborates exit-tightening proposals.
+    bad_stock_no_lever_count > 3: the strategy is buying stocks with no potential
+      and no existing gate catches them. This is a structural gap -- note it as
+      future structural work but do NOT propose a parameter tweak in response.
+      Instead, use it to deprioritize gate-tightening (which would sacrifice good
+      entries) and focus on position-sizing or regime-based exposure changes instead.
+
+  gate_blame_tally: individual gate blame counts. Only loser-trade entry blame and
+    all-trade exit blame are included. If a gate appears here but NOT in entry_signals
+    (because the trades weren't GATE_LEAK), this indicates timing-only pressure from
+    loser trades -- treat as weaker corroborating evidence only.
 
 Rules:
   - Check Historian summary FIRST: if direction_exhausted=true for a parameter, skip it entirely.
@@ -1163,6 +1561,7 @@ def run_param_optimizer(agent1_data, current_params, current_best_fitness,
         old_sigs      = agent1_data.get("parameter_signals", {})
         entry_signals = {k: v for k, v in old_sigs.items() if k.startswith("gates.")}
         exit_signals  = {k: v for k, v in old_sigs.items() if not k.startswith("gates.")}
+    timing_signals    = agent1_data.get("timing_signals", {})
     top_entry_signal  = agent1_data.get("top_entry_signal", "")
     top_entry_count   = agent1_data.get("top_entry_signal_count", 0)
     top_exit_signal   = agent1_data.get("top_exit_signal", "")
@@ -1199,6 +1598,14 @@ def run_param_optimizer(agent1_data, current_params, current_best_fitness,
         if rejection_msg else ""
     )
 
+    most_blamed_gate       = timing_signals.get("most_blamed_gate", "n/a")
+    most_blamed_gate_count = timing_signals.get("most_blamed_gate_count", 0)
+    bought_too_early_count = timing_signals.get("bought_too_early_count", 0)
+    bought_early_won_count = timing_signals.get("bought_early_but_won_count", 0)
+    sold_too_early_count   = timing_signals.get("sold_too_early_count", 0)
+    sold_too_late_count    = timing_signals.get("sold_too_late_count", 0)
+    bad_stock_count        = timing_signals.get("bad_stock_no_lever_count", 0)
+
     user_text = f"""{rejection_prefix}VERDICT MATRIX SUMMARY (distribution of trade types -- read before acting on entry signals):
 {json.dumps(matrix_summary, indent=2)}
 
@@ -1216,6 +1623,20 @@ AGENT 1 EXIT SIGNALS (exit calibration problems):
 TOP EXIT SIGNAL: {top_exit_signal} ({top_exit_count}/30 trades)
 
 OVERALL TOP SIGNAL: {top_signal} ({top_count}/30 trades)
+
+AGENT 1 TIMING SIGNALS (3-window buy/sell timing analysis -- independent corroborating evidence):
+{json.dumps(timing_signals, indent=2)}
+TIMING SUMMARY:
+  Most blamed gate: {most_blamed_gate} ({most_blamed_gate_count} trades)
+  Bought too early (loser, no recovery): {bought_too_early_count} trades
+  Bought early but won (strategy signature -- dip-then-recover): {bought_early_won_count} trades
+  Sold too early: {sold_too_early_count} trades  |  Sold too late: {sold_too_late_count} trades
+  Bad stock / no lever: {bad_stock_count} trades
+  NOTE: bought_early_but_won_count is the strategy's dip-then-rise pattern -- a high
+  count is GOOD and must NOT be treated as a gate problem. Only bought_too_early_count
+  (losers) and sold_* counts carry tuning signal. gate_blame_tally excludes winner dips.
+  bad_stock_no_lever_count > 3 means structural gap -- do NOT respond by tightening gates;
+  focus on position_sizing or regime_exposure_caps instead.
 
 HISTORIAN SUMMARY (complete history of all parameters ever tested):
 {historian_json}
@@ -1352,11 +1773,12 @@ def baseline_run():
 
 def run_iteration(iteration_num, baseline_n_closed, current_fitness, budget_remaining,
                   kept_before=0, current_best_fitness=0.0, session_blacklist=None,
-                  analysis_report=None):
+                  analysis_report=None, n_sample=None):
     """
     Run one full optimization iteration.
     kept_before: number of changes kept so far (used to trigger walk-forward check).
     session_blacklist: set of (param_path, new_value) tuples reverted this session.
+    n_sample: passed to run_prep() to control trade batch size (default 30).
     Returns (new_fitness: float, kept: bool, param_path: str).
     """
     global _current_best_fitness
@@ -1375,7 +1797,7 @@ def run_iteration(iteration_num, baseline_n_closed, current_fitness, budget_rema
     # Step 1: Refresh trade sample (re-run prep)
     if not SAMPLED_TRADES.exists() or iteration_num == 1:
         print("  [PREP] Refreshing sampled_trades.json ...")
-        if not run_prep(analysis_report=analysis_report):
+        if not run_prep(analysis_report=analysis_report, n_sample=n_sample):
             print("  [PREP] FAILED -- skipping iteration")
             return current_fitness, False, ""
 
@@ -1539,23 +1961,25 @@ def run_iteration(iteration_num, baseline_n_closed, current_fitness, budget_rema
         # Walk-forward check every Nth kept change
         new_kept_count = kept_before + 1
         wf_spread = wf_verdict = None
+        wf_per_period = None
         if new_kept_count % WALK_FORWARD_CHECK_EVERY == 0:
-            prev_spread = _walk_forward_cache["spread"] if _walk_forward_cache else None
             wf_info    = run_walk_forward_check(iteration_num)
             wf_spread  = wf_info["spread"]
             wf_verdict = wf_info["verdict"]
+            wf_per_period = wf_info.get("per_period", {})
 
-            # Revert if spread regressed beyond tolerance vs previous WF check
-            if prev_spread is not None and (wf_spread - prev_spread) > WALK_FORWARD_SPREAD_TOLERANCE:
-                print(f"  [WF-REVERT] spread {prev_spread:.2f} -> {wf_spread:.2f} "
-                      f"(+{wf_spread - prev_spread:.2f} > tolerance {WALK_FORWARD_SPREAD_TOLERANCE}) "
-                      f"-- reverting kept change")
+            # Per-regime floor check (replaces direction-blind spread-ceiling).
+            # Gates: (b) every period >= baseline - 3.0; (c) avg >= baseline avg.
+            wf_ok, wf_failures = check_wf_floors(wf_info)
+            if not wf_ok:
+                failure_str = " | ".join(wf_failures)
+                print(f"  [WF-REVERT] per-regime floor check FAILED: {failure_str}")
                 restore_to_best()
                 _append_change_log(
-                    f"REVERTED_WF_REGRESSION  iter={iteration_num}  "
+                    f"REVERTED_WF_FLOOR_FAIL  iter={iteration_num}  "
                     f"{param_path}: {old_value}->{new_value}  "
                     f"fitness {current_fitness:.4f}->{new_fitness:.4f}  "
-                    f"wf_spread {prev_spread:.2f}->{wf_spread:.2f}"
+                    f"failures: {failure_str}"
                 )
                 append_params_history({
                     "ts": datetime.now().strftime("%Y-%m-%d %H:%M"),
@@ -1566,16 +1990,22 @@ def run_iteration(iteration_num, baseline_n_closed, current_fitness, budget_rema
                     "new_value": new_value,
                     "fitness_before": current_fitness,
                     "fitness_after": new_fitness,
-                    "reason": "REVERTED_WF_REGRESSION",
+                    "reason": "REVERTED_WF_FLOOR_FAIL",
+                    "wf_floor_failures": wf_failures,
                     "rationale": rationale,
                     "walk_forward_spread": wf_spread,
                     "walk_forward_verdict": wf_verdict,
+                    "walk_forward_per_period": wf_per_period,
                     "session_best_fitness_before": current_best_fitness,
                     "session_best_fitness_after":  current_best_fitness,
                     "historian_top_signal": historian_top,
                 })
                 _save_verdict(iteration_num, current_fitness, agent1_data, param_path, "REVERTED")
                 return current_fitness, False, param_path
+
+            # WF passed all gates -- update baselines to this new higher state
+            if wf_per_period:
+                save_wf_baselines(wf_info.get("period_results", {}))
 
         _append_change_log(
             f"KEPT  iter={iteration_num}  {param_path}: {old_value}->{new_value}  "
@@ -1593,8 +2023,9 @@ def run_iteration(iteration_num, baseline_n_closed, current_fitness, budget_rema
             "fitness_after": new_fitness,
             "reason": "improved",
             "rationale": rationale,
-            "walk_forward_spread":  wf_spread,
-            "walk_forward_verdict": wf_verdict,
+            "walk_forward_spread":     wf_spread,
+            "walk_forward_verdict":    wf_verdict,
+            "walk_forward_per_period": wf_per_period,
             "best_fitness_after": new_fitness,
             "session_best_fitness_before": current_best_fitness,
             "session_best_fitness_after":  new_fitness,
@@ -1636,17 +2067,20 @@ def run_iteration(iteration_num, baseline_n_closed, current_fitness, budget_rema
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--iterations",    type=int,   default=1)
-    ap.add_argument("--budget",        type=float, default=10.0,
+    ap.add_argument("--iterations",      type=int,   default=1)
+    ap.add_argument("--budget",          type=float, default=10.0,
                     help="Max total API spend in USD")
-    ap.add_argument("--once",          action="store_true",
+    ap.add_argument("--once",            action="store_true",
                     help="Run exactly one iteration")
-    ap.add_argument("--baseline-only", action="store_true",
+    ap.add_argument("--baseline-only",   action="store_true",
                     help="Run baseline simulation only, no agent loop")
     ap.add_argument("--no-restore",      action="store_true",
                     help="Diagnostic: skip session-start restore, run whatever is in strategy_params.json")
     ap.add_argument("--analysis-report", default=None,
                     help="Path to portfolio_report.json to sample trades from (default: reports/portfolio_report.json)")
+    ap.add_argument("--analysis-sample", type=int, default=30,
+                    help="Number of trades to sample for Agent 1 analysis (default 30; "
+                         "use 20 for large OOS reports where the 30-trade prompt exceeds ~150K tokens)")
     args = ap.parse_args()
 
     if not _ANTHROPIC_OK:
@@ -1669,9 +2103,7 @@ def main():
     if args.no_restore:
         print("  [BEST] --no-restore: skipping session-start restore, running strategy_params.json as-is")
         live = json.loads(PARAMS_JSON.read_text())
-        print(f"  [BEST] Live params: trailing_stop_pct={live['exits']['trailing_stop_pct']}, "
-              f"below_ma_trend_floor={live['exits']['below_ma_trend_floor']}, "
-              f"gm_tops.solar_hw={live['gates']['gm_tops']['solar_hw']}")
+        verify_baseline_params(live)
     else:
         if not CURRENT_BEST_JSON.exists():
             shutil.copy2(str(PARAMS_JSON), str(CURRENT_BEST_JSON))
@@ -1680,9 +2112,7 @@ def main():
         shutil.copy2(str(CURRENT_BEST_JSON), str(PARAMS_JSON))
         print(f"  [BEST] Session start: restored strategy_params.json from current_best_params.json")
         restored = json.loads(CURRENT_BEST_JSON.read_text())
-        print(f"  [BEST] Verified: trailing_stop_pct={restored['exits']['trailing_stop_pct']}, "
-              f"below_ma_trend_floor={restored['exits']['below_ma_trend_floor']}, "
-              f"gm_tops.solar_hw={restored['gates']['gm_tops']['solar_hw']}")
+        verify_baseline_params(restored)
 
     # ---- Baseline (runs on the restored best-state params) ----
     print("  Running baseline simulation ...")
@@ -1739,12 +2169,18 @@ def main():
                   f"${budget_limit:.2f} -- stopping")
             break
 
+        n_sample = args.analysis_sample if args.analysis_sample != 30 else None
+        if args.analysis_sample != 30:
+            print(f"  [PREP] --analysis-sample {args.analysis_sample}: "
+                  f"trade batch reduced from 30 to {args.analysis_sample} trades "
+                  f"(OOS prompt size reduction)", flush=True)
         new_fitness, kept, param_path = run_iteration(
             i, baseline_n_closed, current_fitness, budget_remaining,
             kept_before=kept_total,
             current_best_fitness=current_best_fitness,
             session_blacklist=_tested_this_session,
             analysis_report=args.analysis_report,
+            n_sample=n_sample,
         )
         current_fitness = new_fitness
         if kept:
