@@ -84,7 +84,7 @@
       "BULL_STRONG": 1.0,
       "BULL_WEAK": 0.85,
       "BEAR_GRIND": 0.6,
-      "BEAR_VOLATILE": 0.4
+      "BEAR_VOLATILE": 0.3
     }
   },
   "regime_detection": {

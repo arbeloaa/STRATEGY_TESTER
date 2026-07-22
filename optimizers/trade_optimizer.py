@@ -26,7 +26,7 @@ Usage:
   python trade_optimizer.py --baseline-only
 """
 
-import sys, json, shutil, subprocess, time, math, argparse
+import sys, json, re, shutil, subprocess, time, math, argparse
 from datetime import datetime
 from pathlib import Path
 
@@ -60,6 +60,7 @@ SAMPLED_TRADES    = REPORTS_DIR  / "sampled_trades.json"
 REPORT_JSON       = REPORTS_DIR  / "portfolio_report.json"
 REPORT_TXT        = REPORTS_DIR  / "portfolio_report.txt"
 PARAMS_HISTORY    = LOGS_DIR     / "params_history.json"
+TRADE_CRITIQUES_JSON = LOGS_DIR  / "trade_critiques.json"
 CHANGE_LOG        = LOGS_DIR     / "change_log.txt"
 VERDICTS_DIR      = LOGS_DIR     / "trade_verdicts"
 WF_BASELINES_FILE = LOGS_DIR     / "wf_baselines.json"
@@ -208,8 +209,6 @@ WALK_FORWARD_CHECK_EVERY = 3      # run after every Nth kept change
 # Baseline references are stored in logs/wf_baselines.json and updated on every
 # structural KEEP so future sessions inherit the correct floors.
 WF_PERIOD_FLOOR_MARGIN = 3.0
-
-WF_BASELINES_FILE = None   # set after LOGS_DIR is available (see below)
 
 _walk_forward_cache   = None    # dict from last run_walk_forward_check(), or None
 _historian_summary    = None    # set by run_historian() once per session, before iteration 1
@@ -472,6 +471,178 @@ def append_params_history(entry):
     history.append(entry)
     with open(PARAMS_HISTORY, "w") as f:
         json.dump(history, f, indent=2)
+
+
+# ============================================================================
+#  TRADE CRITIQUE STORE  (persistent, accumulates across every session)
+# ============================================================================
+# Agent 1 only ever sees a fresh 30-trade sample per iteration. This store keeps
+# every verdict ever recorded for every trade, keyed by a stable trade ID, so
+# cumulative_signals (below) can tell Agent 2 "this param has been flagged in
+# 4 separate sessions over 3 weeks" instead of just "this param showed up in
+# today's sample" -- much stronger evidence than any single iteration alone.
+
+CONFIDENCE_WEIGHTS = {"HIGH": 3, "MEDIUM": 2, "LOW": 1}
+
+
+def load_trade_critiques():
+    if not TRADE_CRITIQUES_JSON.exists():
+        return {}
+    try:
+        with open(TRADE_CRITIQUES_JSON) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_trade_critiques(critiques):
+    TRADE_CRITIQUES_JSON.parent.mkdir(parents=True, exist_ok=True)
+    with open(TRADE_CRITIQUES_JSON, "w") as f:
+        json.dump(critiques, f, indent=2)
+
+
+def _trade_critique_id(trade):
+    """Stable cross-session trade ID -- independent of the per-iteration trade_id
+    (which is just a 1..30 index into that iteration's sample and means nothing
+    across sessions)."""
+    return f"{trade.get('ticker', 'UNKNOWN')}_{trade.get('entry_date', '?')}_{trade.get('exit_date', '?')}"
+
+
+def merge_trade_verdicts(agent1_data, session_ts):
+    """
+    Merge this iteration's Agent 1 trade_verdicts into the persistent
+    logs/trade_critiques.json store. New trade IDs get added; existing ones get
+    a new verdict APPENDED to their history -- never overwritten, so verdict
+    drift across sessions stays visible instead of silently disappearing.
+    Returns (critiques, n_new, n_repeat).
+    """
+    critiques = load_trade_critiques()
+    trade_verdicts = agent1_data.get("trade_verdicts", [])
+    n_new = n_repeat = 0
+
+    for trade in trade_verdicts:
+        if not isinstance(trade, dict):
+            continue
+        tid = _trade_critique_id(trade)
+        verdict_entry = {
+            "session_ts":             session_ts,
+            "entry_decision_quality": trade.get("entry_decision_quality"),
+            "stock_outcome":          trade.get("stock_outcome"),
+            "verdict_matrix":         trade.get("verdict_matrix"),
+            "entry_mistake":          trade.get("entry_mistake"),
+            "exit_parameter_signal":  trade.get("exit_parameter_signal"),
+            "entry_parameter_signal": trade.get("entry_parameter_signal"),
+        }
+        if tid not in critiques:
+            critiques[tid] = {
+                "ticker":         trade.get("ticker"),
+                "entry_date":     trade.get("entry_date"),
+                "exit_date":      trade.get("exit_date"),
+                "pnl_pct":        trade.get("pnl_pct"),
+                "exit_reason":    trade.get("exit_reason"),
+                "verdicts":       [verdict_entry],
+                "verdict_stable": True,
+            }
+            n_new += 1
+        else:
+            critiques[tid]["verdicts"].append(verdict_entry)
+            n_repeat += 1
+            # Update core facts in case they were missing/null on first sighting.
+            for k in ("ticker", "entry_date", "exit_date", "pnl_pct", "exit_reason"):
+                if critiques[tid].get(k) is None and trade.get(k) is not None:
+                    critiques[tid][k] = trade.get(k)
+
+        matrices = [v.get("verdict_matrix") for v in critiques[tid]["verdicts"] if v.get("verdict_matrix")]
+        critiques[tid]["verdict_stable"] = len(set(matrices)) <= 1
+
+    save_trade_critiques(critiques)
+    return critiques, n_new, n_repeat
+
+
+def compute_cumulative_signals(critiques):
+    """
+    Aggregate cross-session evidence from the ENTIRE trade_critiques.json store
+    into a compact per-parameter summary -- this is what gets injected into
+    Agent 2's prompt, never the raw trade-by-trade file, so prompt size stays
+    small (a few KB) no matter how large the critique store grows.
+
+    Per parameter path (from exit_parameter_signal / entry_parameter_signal
+    across every verdict of every trade ever recorded):
+      - total_trades_flagging:     distinct trades that have ever flagged this param
+      - confidence_weighted_count: sum of HIGH=3/MEDIUM=2/LOW=1 across all flags
+      - distinct_sessions:         how many separate optimizer sessions flagged it
+      - direction:                 dominant raise/lower direction, or MIXED if inconsistent
+      - trend:                     ACTIVE (flagged in one of the 2 most recent sessions)
+                                    or FADING (only flagged in older sessions)
+      - strength:                  STRONG (3+ sessions, consistent direction),
+                                    MODERATE (2 sessions, consistent), else WEAK
+    """
+    agg = {}
+    all_sessions = set()
+
+    for tid, entry in critiques.items():
+        for v in entry.get("verdicts", []):
+            session_ts = v.get("session_ts")
+            if session_ts:
+                all_sessions.add(session_ts)
+            for sig_key in ("exit_parameter_signal", "entry_parameter_signal"):
+                sig = v.get(sig_key)
+                if not isinstance(sig, dict):
+                    continue
+                path = sig.get("path")
+                if not path:
+                    continue
+                direction  = sig.get("direction")
+                confidence = sig.get("confidence", "LOW")
+                weight     = CONFIDENCE_WEIGHTS.get(confidence, 1)
+                slot = agg.setdefault(path, {
+                    "trade_ids": set(), "sessions": set(),
+                    "weighted_count": 0, "directions": {},
+                })
+                slot["trade_ids"].add(tid)
+                if session_ts:
+                    slot["sessions"].add(session_ts)
+                slot["weighted_count"] += weight
+                if direction:
+                    slot["directions"][direction] = slot["directions"].get(direction, 0) + 1
+
+    if not all_sessions:
+        return {"total_trades_tracked": len(critiques), "total_sessions": 0, "parameters": {}}
+
+    sorted_sessions = sorted(all_sessions)
+    recent_sessions = set(sorted_sessions[-2:])  # trend = still showing up recently?
+
+    parameters = {}
+    for path, slot in agg.items():
+        n_sessions   = len(slot["sessions"])
+        directions   = slot["directions"]
+        consistent   = len(directions) <= 1
+        dominant_dir = max(directions, key=directions.get) if directions else None
+        parameters[path] = {
+            "total_trades_flagging":     len(slot["trade_ids"]),
+            "confidence_weighted_count": slot["weighted_count"],
+            "distinct_sessions":        n_sessions,
+            "direction":                dominant_dir if consistent else "MIXED",
+            "trend":                    "ACTIVE" if (slot["sessions"] & recent_sessions) else "FADING",
+            "strength": (
+                "STRONG"   if n_sessions >= 3 and consistent else
+                "MODERATE" if n_sessions == 2 and consistent else
+                "WEAK"
+            ),
+        }
+
+    # Most-corroborated evidence first: more distinct sessions, then higher weight.
+    parameters = dict(sorted(
+        parameters.items(),
+        key=lambda kv: (-kv[1]["distinct_sessions"], -kv[1]["confidence_weighted_count"])
+    ))
+
+    return {
+        "total_trades_tracked": len(critiques),
+        "total_sessions":       len(all_sessions),
+        "latest_session":       sorted_sessions[-1],
+        "parameters":           parameters,
+    }
 
 
 # ============================================================================
@@ -1532,8 +1703,19 @@ Rules:
   - Never propose an exact match to a prior REVERTED attempt.
   - Propose only ONE parameter path change per iteration.
   - Prefer conservative adjustments (10-20% change from current value).
+  - CUMULATIVE SIGNALS (if present in the user message) reflect evidence across ALL past
+    sessions, not just this iteration's fresh sample. A parameter with distinct_sessions >= 3
+    and a consistent direction (strength=STRONG) is STRONGER evidence than anything in this
+    iteration's fresh entry/exit signals alone -- prefer acting on it even if this iteration's
+    sample doesn't happen to surface it. Conversely, a parameter that appeared once, long ago,
+    and shows trend=FADING (hasn't recurred in the 2 most recent sessions) is WEAKER evidence
+    than a fresh HIGH-confidence signal from this iteration -- do not treat stale, non-recurring
+    flags as equal to current, corroborated ones just because their raw count looks large.
 
-Output ONLY this JSON (no other text):
+Output valid JSON only -- no other punctuation, no prose before or after, no semicolons
+anywhere in the object. Separate every field from the next with a comma; the last field
+must have NO trailing comma. Example of correct comma placement (note the comma after
+"reason"'s closing quote, and no comma after "predicted_impact"'s closing quote):
 {
   "param_path": "exits.trailing_stop_pct",
   "old_value": 0.145,
@@ -1543,12 +1725,62 @@ Output ONLY this JSON (no other text):
 }"""
 
 
+def _repair_json_punctuation(s):
+    """Fix the malformed-JSON patterns observed from Agent 2 (Opus occasionally
+    emits a stray ';' where ',' was intended). Applied only as a single retry
+    after a hard json.loads() fails -- never used to "fix" otherwise-valid JSON."""
+    # Semicolon immediately before a closing brace/bracket -> just drop it
+    # (e.g. `"predicted_impact": "...";\n}` -> no comma needed there anyway).
+    s = re.sub(r';(\s*[}\]])', r'\1', s)
+    # Semicolon where a comma was intended, i.e. followed by the start of the
+    # next key -- the observed failure: `"reason": "...overshoot.";\n  "predicted_impact"`.
+    s = re.sub(r';(\s*")', r',\1', s)
+    # Trailing comma before a closing brace/bracket.
+    s = re.sub(r',(\s*[}\]])', r'\1', s)
+    return s
+
+
+def _is_numeric(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def _validate_agent2_schema(agent2_data, current_params):
+    """Re-validate a parsed (possibly repaired) Agent 2 proposal against the live
+    config before trusting it -- a successful json.loads() after punctuation repair
+    is not proof the *content* is sound. Returns an error string, or None if valid."""
+    if "param_path" not in agent2_data or "new_value" not in agent2_data:
+        return "missing required key(s) param_path/new_value"
+
+    param_path = agent2_data["param_path"]
+    try:
+        actual_current = _get_by_path(current_params, param_path)
+    except (KeyError, TypeError):
+        return f"param_path '{param_path}' does not exist in current strategy_params.json"
+
+    old_value = agent2_data.get("old_value")
+    if old_value is not None and old_value != actual_current:
+        return (f"old_value mismatch for '{param_path}': proposal says {old_value!r}, "
+                f"current config has {actual_current!r}")
+
+    new_value = agent2_data["new_value"]
+    if type(new_value) is not type(actual_current) and not (
+        _is_numeric(new_value) and _is_numeric(actual_current)
+    ):
+        return (f"new_value type mismatch for '{param_path}': expected "
+                f"{type(actual_current).__name__}, got {type(new_value).__name__} ({new_value!r})")
+
+    return None
+
+
 def run_param_optimizer(agent1_data, current_params, current_best_fitness,
-                        session_blacklist=None, rejection_msg=None):
+                        session_blacklist=None, rejection_msg=None, cumulative_signals=None):
     """
     Run Agent 2 (Parameter Optimizer, Opus).
     session_blacklist: set of (param_path, new_value) tuples already tried-and-reverted
                        this session; injected into the prompt as FORBIDDEN entries.
+    cumulative_signals: compact cross-session aggregate from compute_cumulative_signals()
+                       (logs/trade_critiques.json) -- supplements, never replaces, this
+                       iteration's fresh 30-trade entry_signals/exit_signals.
     Returns (param_path: str, new_value, rationale: str, raw_response: str).
     """
     print("\n  [AGENT 2 - Parameter Optimizer / Opus]", flush=True)
@@ -1598,6 +1830,26 @@ def run_param_optimizer(agent1_data, current_params, current_best_fitness,
         if rejection_msg else ""
     )
 
+    if cumulative_signals and cumulative_signals.get("parameters"):
+        cumulative_signals_block = (
+            f"\nCUMULATIVE SIGNALS -- ACCUMULATED EVIDENCE ACROSS {cumulative_signals['total_sessions']} "
+            f"SESSIONS AND {cumulative_signals['total_trades_tracked']} TRACKED TRADES "
+            f"(from logs/trade_critiques.json, NOT this iteration's fresh sample):\n"
+            f"{json.dumps(cumulative_signals['parameters'], indent=2)}\n"
+            f"HOW TO WEIGH THIS: this is cross-session history, distinct from the fresh "
+            f"AGENT 1 ENTRY/EXIT SIGNALS above (which reflect only THIS iteration's 30-trade "
+            f"sample). A parameter with distinct_sessions >= 3 and a consistent direction "
+            f"(strength=STRONG) is STRONGER evidence than a single-session flag, even if it "
+            f"doesn't appear in this iteration's fresh sample at all -- prefer it. A parameter "
+            f"with trend=FADING (not flagged in either of the 2 most recent sessions) or only "
+            f"1 distinct session (strength=WEAK) is WEAKER evidence than a fresh HIGH-confidence "
+            f"signal from this iteration, even if its confidence_weighted_count looks large from "
+            f"repeated flags long ago -- do not treat old, non-recurring evidence as equal to "
+            f"current, corroborated evidence.\n"
+        )
+    else:
+        cumulative_signals_block = ""
+
     most_blamed_gate       = timing_signals.get("most_blamed_gate", "n/a")
     most_blamed_gate_count = timing_signals.get("most_blamed_gate_count", 0)
     bought_too_early_count = timing_signals.get("bought_too_early_count", 0)
@@ -1623,7 +1875,7 @@ AGENT 1 EXIT SIGNALS (exit calibration problems):
 TOP EXIT SIGNAL: {top_exit_signal} ({top_exit_count}/30 trades)
 
 OVERALL TOP SIGNAL: {top_signal} ({top_count}/30 trades)
-
+{cumulative_signals_block}
 AGENT 1 TIMING SIGNALS (3-window buy/sell timing analysis -- independent corroborating evidence):
 {json.dumps(timing_signals, indent=2)}
 TIMING SUMMARY:
@@ -1714,20 +1966,40 @@ DECISION RULES:
     # so that prose preambles like "Note: ..." before the JSON don't crash the parser.
     def _extract_json_obj(s):
         """Return the first top-level {...} substring found in s, or s itself."""
-        import re as _re
-        m = _re.search(r'\{.*\}', s, _re.DOTALL)
+        m = re.search(r'\{.*\}', s, re.DOTALL)
         return m.group(0) if m else s
 
+    candidate = _extract_json_obj(_strip_fences(text))
     try:
-        agent2_data = json.loads(_extract_json_obj(_strip_fences(text)))
+        agent2_data = json.loads(candidate)
+    except json.JSONDecodeError as e:
+        # Single repair attempt for known LLM punctuation slips (stray ';' for ',',
+        # trailing commas). If the repaired text still doesn't parse, fall through
+        # to the same except-branch below and skip the iteration as before.
+        try:
+            agent2_data = json.loads(_repair_json_punctuation(candidate))
+            print(f"  [AGENT 2] Repaired malformed JSON punctuation (original error: {e})")
+        except json.JSONDecodeError as e2:
+            print(f"  [AGENT 2] Parse failed: {e2} -- skipping iteration")
+            return None, None, "parse error", text
+
+    try:
         param_path  = agent2_data["param_path"]
         new_value   = agent2_data["new_value"]
         rationale   = agent2_data.get("reason", "")
-        print(f"  [AGENT 2] Chosen: {param_path}: {agent2_data.get('old_value')} -> {new_value}")
-        print(f"  [AGENT 2] Reason: {rationale}")
-    except (json.JSONDecodeError, KeyError) as e:
-        print(f"  [AGENT 2] Parse failed: {e} -- skipping iteration")
+    except KeyError as e:
+        print(f"  [AGENT 2] Parse failed: missing key {e} -- skipping iteration")
         return None, None, "parse error", text
+
+    # A repaired-but-uncertain proposal is never trusted on parse success alone --
+    # re-validate its content against the live config before returning it.
+    schema_err = _validate_agent2_schema(agent2_data, current_params)
+    if schema_err:
+        print(f"  [AGENT 2] Schema validation failed: {schema_err} -- skipping iteration")
+        return None, None, f"schema validation failed: {schema_err}", text
+
+    print(f"  [AGENT 2] Chosen: {param_path}: {agent2_data.get('old_value')} -> {new_value}")
+    print(f"  [AGENT 2] Reason: {rationale}")
 
     return param_path, new_value, rationale, text
 
@@ -1822,9 +2094,18 @@ def run_iteration(iteration_num, baseline_n_closed, current_fitness, budget_rema
         exit_sigs  = agent1_data.get("exit_signals", agent1_data.get("parameter_signals", {}))
         all_sigs   = {**entry_sigs, **exit_sigs}
         if all_sigs:
+            # Agent 1 occasionally returns a flat string (e.g. entry_signals.message)
+            # instead of the expected per-parameter dict -- guard every .get() against
+            # that schema drift rather than crashing the whole iteration on it.
+            for k, v in all_sigs.items():
+                if not isinstance(v, dict):
+                    print(f"  [WARN] entry_signals contained non-dict value: {k}={v!r} -- skipping")
             sigs = ", ".join(
-                k + ":" + str(v.get("count", 0))
-                for k, v in sorted(all_sigs.items(), key=lambda x: -x[1].get("count", 0))
+                k + ":" + str(v.get("count", 0) if isinstance(v, dict) else 0)
+                for k, v in sorted(
+                    all_sigs.items(),
+                    key=lambda x: -(x[1].get("count", 0) if isinstance(x[1], dict) else 0)
+                )
             )
             print(f"  [AGENT 1] All signals: {sigs}")
     except json.JSONDecodeError as e:
@@ -1832,11 +2113,26 @@ def run_iteration(iteration_num, baseline_n_closed, current_fitness, budget_rema
         print(f"  [AGENT 1] Raw response: {analyst_text[:500]}")
         return current_fitness, False, ""
 
+    # Merge this iteration's verdicts into the persistent cross-session critique store,
+    # then compute a compact cumulative-evidence summary for Agent 2 (never the raw file).
+    session_ts_for_critique = datetime.now().strftime("%Y-%m-%d %H:%M")
+    _, n_new_trades, n_repeat_trades = merge_trade_verdicts(agent1_data, session_ts_for_critique)
+    critiques_now    = load_trade_critiques()
+    n_multi_verdict  = sum(1 for e in critiques_now.values() if len(e.get("verdicts", [])) >= 2)
+    n_unstable       = sum(1 for e in critiques_now.values() if not e.get("verdict_stable", True))
+    print(f"  [CRITIQUE] trade_critiques.json: +{n_new_trades} new, +{n_repeat_trades} repeat  "
+          f"(total tracked={len(critiques_now)}, with 2+ verdicts={n_multi_verdict}, "
+          f"verdict_drift={n_unstable})")
+    cumulative_signals = compute_cumulative_signals(critiques_now)
+    print(f"  [CRITIQUE] cumulative_signals: {len(cumulative_signals.get('parameters', {}))} params "
+          f"across {cumulative_signals.get('total_sessions', 0)} sessions")
+
     # Step 3: Agent 2 -- propose one parameter change
     current_params = read_params()
     param_path, new_value, rationale, raw_resp = run_param_optimizer(
         agent1_data, current_params, current_best_fitness,
         session_blacklist=session_blacklist,
+        cumulative_signals=cumulative_signals,
     )
     if param_path is None:
         print("  [ITER] Agent 2 returned no valid proposal -- skipping")
@@ -1862,6 +2158,7 @@ def run_iteration(iteration_num, baseline_n_closed, current_fitness, budget_rema
             agent1_data, current_params, current_best_fitness,
             session_blacklist=_tested_this_session,
             rejection_msg=reject_msg,
+            cumulative_signals=cumulative_signals,
         )
         if param_path is None:
             _save_verdict(iteration_num, current_fitness, agent1_data, None, "A2_REPEAT_BLOCKED")
