@@ -71,22 +71,26 @@ SIM_END   = "2024-12-31"
 # Last confirmed-reproducible best fitness. Used as the floor for best_ever, which is
 # computed dynamically at session start as max(this, current_best_fitness) so it rises
 # automatically with every real improvement and never needs manual editing again.
-# Updated to 67.745 on 2026-07-20: gm_relative@p50 structural KEEP
-# (total_return=+119.29%, sharpe=0.81 -> fitness = 119.29*0.5 + 0.81*20*0.5 = 67.745).
-BEST_FITNESS_EVER_OVERRIDE = 67.745
+# Updated to 73.64 on 2026-07-22: sizing.regime_exposure_cap.BEAR_VOLATILE 0.4->0.3,
+# WF-validated against per-regime floors (bull/bear/recovery/mixed all passed, avg
+# 20.2425 >= prior baseline avg 18.315). NOTE: verified but not yet git-committed as of
+# this update -- runtime checks reflect the validated state regardless of commit status.
+BEST_FITNESS_EVER_OVERRIDE = 73.64
 
-# Load-bearing param values for the 67.745 verified state (gm_relative@p50 structural KEEP,
-# 2026-07-20). Session-start verify asserts the restored current_best_params.json against
-# these -- a silent drift here (e.g. trailing_stop_pct 0.155 -> 0.17) previously passed
-# because the old print only echoed whatever was in the file instead of checking it against
-# a fixed reference. Update this dict only when a new baseline is verified and committed.
+# Load-bearing param values for the 73.64 verified state (regime_exposure_cap.BEAR_VOLATILE
+# structural KEEP, 2026-07-22, on top of the 2026-07-20 gm_relative@p50 state). Session-start
+# verify asserts the restored current_best_params.json against these -- a silent drift here
+# (e.g. trailing_stop_pct 0.155 -> 0.17) previously passed because the old print only echoed
+# whatever was in the file instead of checking it against a fixed reference. Update this dict
+# only when a new baseline is verified (and, ideally, committed).
 VERIFIED_BASELINE_PARAMS = {
-    "exits.trailing_stop_pct":     0.155,
-    "exits.take_profit_pct":       0.75,
-    "exits.below_ma_trend_floor":  0.085,
-    "gates.gm_tops.solar_hw":      50,
-    "gates.gm_relative.enabled":   True,
-    "gates.gm_relative.percentile": 50,
+    "exits.trailing_stop_pct":              0.155,
+    "exits.take_profit_pct":                0.75,
+    "exits.below_ma_trend_floor":           0.085,
+    "gates.gm_tops.solar_hw":               50,
+    "gates.gm_relative.enabled":            True,
+    "gates.gm_relative.percentile":         50,
+    "sizing.regime_exposure_cap.BEAR_VOLATILE": 0.3,
 }
 
 
@@ -1711,6 +1715,10 @@ Rules:
     and shows trend=FADING (hasn't recurred in the 2 most recent sessions) is WEAKER evidence
     than a fresh HIGH-confidence signal from this iteration -- do not treat stale, non-recurring
     flags as equal to current, corroborated ones just because their raw count looks large.
+  - If a TARGET FAMILY RESTRICTION block appears at the top of the user message, it OVERRIDES
+    every rule above -- you may only propose a parameter from its listed paths this iteration,
+    full stop, regardless of what Historian priority or unexplored_parameters would otherwise
+    suggest.
 
 Output valid JSON only -- no other punctuation, no prose before or after, no semicolons
 anywhere in the object. Separate every field from the next with a comma; the last field
@@ -1773,7 +1781,8 @@ def _validate_agent2_schema(agent2_data, current_params):
 
 
 def run_param_optimizer(agent1_data, current_params, current_best_fitness,
-                        session_blacklist=None, rejection_msg=None, cumulative_signals=None):
+                        session_blacklist=None, rejection_msg=None, cumulative_signals=None,
+                        target_family=None):
     """
     Run Agent 2 (Parameter Optimizer, Opus).
     session_blacklist: set of (param_path, new_value) tuples already tried-and-reverted
@@ -1781,6 +1790,8 @@ def run_param_optimizer(agent1_data, current_params, current_best_fitness,
     cumulative_signals: compact cross-session aggregate from compute_cumulative_signals()
                        (logs/trade_critiques.json) -- supplements, never replaces, this
                        iteration's fresh 30-trade entry_signals/exit_signals.
+    target_family: if set, restricts the prompt to only allow proposals from
+                   PARAMETER_FAMILIES[target_family]["members"] (see --target-family).
     Returns (param_path: str, new_value, rationale: str, raw_response: str).
     """
     print("\n  [AGENT 2 - Parameter Optimizer / Opus]", flush=True)
@@ -1850,6 +1861,21 @@ def run_param_optimizer(agent1_data, current_params, current_best_fitness,
     else:
         cumulative_signals_block = ""
 
+    if target_family:
+        family_members = PARAMETER_FAMILIES[target_family]["members"]
+        target_family_block = (
+            f"TARGET FAMILY RESTRICTION (ACTIVE THIS SESSION) -- you may ONLY propose a change "
+            f"within the '{target_family}' family. Allowed parameter paths, ONLY these:\n"
+            + "\n".join(f"  - {m}" for m in family_members) + "\n"
+            f"Any proposal for a parameter NOT in this exact list will be REJECTED and you will "
+            f"be re-prompted once; a second violation fails the iteration entirely. This "
+            f"restriction OVERRIDES every other rule in this prompt about unexplored_parameters, "
+            f"next_untested_values, or family priority -- even if a Historian-favored parameter "
+            f"lies outside this family, do not propose it this iteration.\n\n"
+        )
+    else:
+        target_family_block = ""
+
     most_blamed_gate       = timing_signals.get("most_blamed_gate", "n/a")
     most_blamed_gate_count = timing_signals.get("most_blamed_gate_count", 0)
     bought_too_early_count = timing_signals.get("bought_too_early_count", 0)
@@ -1858,7 +1884,7 @@ def run_param_optimizer(agent1_data, current_params, current_best_fitness,
     sold_too_late_count    = timing_signals.get("sold_too_late_count", 0)
     bad_stock_count        = timing_signals.get("bad_stock_no_lever_count", 0)
 
-    user_text = f"""{rejection_prefix}VERDICT MATRIX SUMMARY (distribution of trade types -- read before acting on entry signals):
+    user_text = f"""{target_family_block}{rejection_prefix}VERDICT MATRIX SUMMARY (distribution of trade types -- read before acting on entry signals):
 {json.dumps(matrix_summary, indent=2)}
 
 AGENT 1 ENTRY SIGNALS (from GATE_LEAK trades only -- justify gate changes with these):
@@ -2045,12 +2071,14 @@ def baseline_run():
 
 def run_iteration(iteration_num, baseline_n_closed, current_fitness, budget_remaining,
                   kept_before=0, current_best_fitness=0.0, session_blacklist=None,
-                  analysis_report=None, n_sample=None):
+                  analysis_report=None, n_sample=None, target_family=None):
     """
     Run one full optimization iteration.
     kept_before: number of changes kept so far (used to trigger walk-forward check).
     session_blacklist: set of (param_path, new_value) tuples reverted this session.
     n_sample: passed to run_prep() to control trade batch size (default 30).
+    target_family: if set, restrict Agent 2 to PARAMETER_FAMILIES[target_family]["members"]
+                   for this iteration (see --target-family). None = unrestricted (default).
     Returns (new_fitness: float, kept: bool, param_path: str).
     """
     global _current_best_fitness
@@ -2133,11 +2161,46 @@ def run_iteration(iteration_num, baseline_n_closed, current_fitness, budget_rema
         agent1_data, current_params, current_best_fitness,
         session_blacklist=session_blacklist,
         cumulative_signals=cumulative_signals,
+        target_family=target_family,
     )
     if param_path is None:
         print("  [ITER] Agent 2 returned no valid proposal -- skipping")
         _save_verdict(iteration_num, current_fitness, agent1_data, None, "A2_FAILED")
         return current_fitness, False, ""
+
+    # Target-family blocker: enforce before any simulator run
+    if target_family and param_path not in PARAMETER_FAMILIES[target_family]["members"]:
+        family_members = PARAMETER_FAMILIES[target_family]["members"]
+        reject_msg = (
+            f"REJECTED: {param_path} is outside the target family '{target_family}'. "
+            f"You may ONLY propose one of: {family_members}."
+        )
+        print(f"  [BLOCKER] {reject_msg}", flush=True)
+        _append_change_log(
+            f"BLOCKED_OUT_OF_FAMILY  iter={iteration_num}  family={target_family}  param={param_path}"
+        )
+        current_params = read_params()
+        param_path, new_value, rationale, _ = run_param_optimizer(
+            agent1_data, current_params, current_best_fitness,
+            session_blacklist=session_blacklist,
+            rejection_msg=reject_msg,
+            cumulative_signals=cumulative_signals,
+            target_family=target_family,
+        )
+        if param_path is None:
+            _save_verdict(iteration_num, current_fitness, agent1_data, None, "A2_FAILED")
+            return current_fitness, False, ""
+        if param_path not in family_members:
+            print(
+                f"  [BLOCKER] 2nd proposal {param_path} also outside family '{target_family}' "
+                f"-- skipping iteration", flush=True,
+            )
+            _append_change_log(
+                f"BLOCKED_OUT_OF_FAMILY  iter={iteration_num}  family={target_family}  "
+                f"param={param_path}  (2nd attempt also out of family)"
+            )
+            _save_verdict(iteration_num, current_fitness, agent1_data, param_path, "A2_FAILED")
+            return current_fitness, False, ""
 
     # Code-level repeat blocker: enforce before any simulator run
     if _is_repeat(param_path, new_value):
@@ -2378,10 +2441,18 @@ def main():
     ap.add_argument("--analysis-sample", type=int, default=30,
                     help="Number of trades to sample for Agent 1 analysis (default 30; "
                          "use 20 for large OOS reports where the 30-trade prompt exceeds ~150K tokens)")
+    ap.add_argument("--target-family",   default=None,
+                    help="Restrict Agent 2's proposals to members of PARAMETER_FAMILIES[<name>] "
+                         "for this session. No effect on any other behavior when omitted.")
     args = ap.parse_args()
 
     if not _ANTHROPIC_OK:
         print("ERROR: anthropic package not installed  (pip install anthropic)")
+        sys.exit(1)
+
+    if args.target_family and args.target_family not in PARAMETER_FAMILIES:
+        print(f"ERROR: --target-family '{args.target_family}' is not a known family. "
+              f"Valid names: {sorted(PARAMETER_FAMILIES.keys())}")
         sys.exit(1)
 
     global _session_timestamp
@@ -2478,6 +2549,7 @@ def main():
             session_blacklist=_tested_this_session,
             analysis_report=args.analysis_report,
             n_sample=n_sample,
+            target_family=args.target_family,
         )
         current_fitness = new_fitness
         if kept:
