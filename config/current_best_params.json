@@ -81,7 +81,7 @@
     "max_adds_per_position": 2,
     "add_on_min_gain_pct": 0.1,
     "regime_exposure_cap": {
-      "BULL_STRONG": 1.0,
+      "BULL_STRONG": 0.9,
       "BULL_WEAK": 0.85,
       "BEAR_GRIND": 0.6,
       "BEAR_VOLATILE": 0.3
