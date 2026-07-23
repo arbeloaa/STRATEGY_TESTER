@@ -59,15 +59,15 @@
     "per_buy_fraction": 0.135,
     "conviction_mult": {
       "HIGH": 1.5,
-      "MED": 1.05,
-      "LOW": 0.45
+      "MED": 1.0,
+      "LOW": 0.4
     },
     "max_positions": 30,
     "max_position_pct_equity": 0.1,
     "regime_position_mult": {
       "BULL_STRONG": 1.0,
       "BULL_WEAK": 0.8,
-      "BEAR_GRIND": 0.55,
+      "BEAR_GRIND": 0.5,
       "BEAR_VOLATILE": 0.35
     },
     "regime_max_positions": {
